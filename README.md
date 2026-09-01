@@ -25,6 +25,10 @@ flutter run -d windows
 - `HA-Finder-Windows-x64`
 - `HA-Finder-macOS`
 
+Windows 工作流还会生成单文件安装器 `HA-Finder-Setup.exe`，并将它发布到 GitHub
+Releases，用户可以直接下载 EXE。安装后的程序仍包含 Flutter 所需的 DLL 和 data
+目录；安装器负责自动管理这些文件。
+
 macOS 工作流使用 Developer ID 签名并提交 Apple 公证。首次配置仓库后，在项目目录
 运行 `./scripts/configure_github_secrets.sh`，根据提示输入 `.p12` 密码和 App Store
 Connect Issuer ID。密码输入时不会显示，也不会写入项目文件。
