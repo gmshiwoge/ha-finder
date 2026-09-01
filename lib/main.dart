@@ -44,7 +44,24 @@ class HomeAssistantDiscovery {
   static const _serviceType = '_home-assistant._tcp.local';
 
   Future<List<HaInstance>> discover() async {
-    final client = MDnsClient();
+    final client = MDnsClient(
+      rawDatagramSocketFactory:
+          (
+            host,
+            port, {
+            bool reuseAddress = false,
+            bool reusePort = false,
+            int ttl = 1,
+          }) => RawDatagramSocket.bind(
+            host,
+            port,
+            reuseAddress: reuseAddress,
+            // Windows Winsock does not support SO_REUSEPORT and reports
+            // WSAENOPROTOOPT (10042) when multicast_dns enables it.
+            reusePort: Platform.isWindows ? false : reusePort,
+            ttl: ttl,
+          ),
+    );
     try {
       await client.start();
       final pointers = await client
@@ -97,7 +114,14 @@ class HomeAssistantDiscovery {
   Future<List<HaInstance>> discoverEnhanced({
     void Function(int checked, int total)? onProgress,
   }) async {
-    final discovered = await discover();
+    List<HaInstance> discovered;
+    try {
+      discovered = await discover();
+    } on Object {
+      // Enhanced discovery is the fallback path: an mDNS failure must not
+      // prevent the subnet probe from running, especially on Windows.
+      discovered = const [];
+    }
     final subnets = await _localSubnets();
     final targets = <String>[];
     for (final subnet in subnets.take(3)) {
