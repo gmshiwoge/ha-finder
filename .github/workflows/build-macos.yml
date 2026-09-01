@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 40
     env:
       APP_PATH: build/macos/Build/Products/Release/HA Finder.app
-      KEYCHAIN_PATH: ${{ runner.temp }}/ha-finder-signing.keychain-db
+      KEYCHAIN_NAME: ha-finder-signing.keychain-db
 
     steps:
       - name: Checkout project
@@ -41,6 +41,7 @@ jobs:
           CERTIFICATE_PATH="$RUNNER_TEMP/DeveloperID.p12"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
           printf '%s' "$MACOS_P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          KEYCHAIN_PATH="$RUNNER_TEMP/$KEYCHAIN_NAME"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -63,6 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/$KEYCHAIN_NAME"
           codesign --force --deep --strict \
             --options runtime \
             --timestamp \
@@ -121,4 +123,4 @@ jobs:
       - name: Remove temporary keychain
         if: always()
         shell: bash
-        run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+        run: security delete-keychain "$RUNNER_TEMP/$KEYCHAIN_NAME" 2>/dev/null || true
