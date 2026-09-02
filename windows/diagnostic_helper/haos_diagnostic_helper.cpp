@@ -46,6 +46,9 @@ struct DhcpRequest {
   uint16_t flags = 0;
   std::array<uint8_t, 6> mac{};
   std::string hostname;
+  std::string client_id;
+  std::string requested_ip;
+  std::string server_identifier;
 };
 
 std::string JsonEscape(const std::string& value) {
@@ -229,6 +232,22 @@ bool ParseDhcp(const uint8_t* data, int length, DhcpRequest* request) {
     if (option == 12 && option_length > 0) {
       request->hostname.assign(reinterpret_cast<const char*>(data + offset), option_length);
     }
+    if ((option == 50 || option == 54) && option_length == 4) {
+      char address[INET_ADDRSTRLEN]{};
+      InetNtopA(AF_INET, const_cast<uint8_t*>(data + offset), address,
+                static_cast<DWORD>(sizeof(address)));
+      if (option == 50) request->requested_ip = address;
+      if (option == 54) request->server_identifier = address;
+    }
+    if (option == 61 && option_length > 0) {
+      std::ostringstream value;
+      value << std::hex << std::setfill('0');
+      for (uint8_t index = 0; index < option_length; ++index) {
+        if (index) value << ':';
+        value << std::setw(2) << static_cast<int>(data[offset + index]);
+      }
+      request->client_id = value.str();
+    }
     offset += option_length;
   }
   return request->type == 1 || request->type == 3;
@@ -267,6 +286,15 @@ std::vector<uint8_t> BuildReply(const uint8_t* request_data, int request_length,
   AddOption(&packet, 1, &subnet_mask.S_un.S_addr, 4);
   const uint32_t lease_seconds = htonl(1800);
   AddOption(&packet, 51, &lease_seconds, 4);
+  const uint32_t renewal_seconds = htonl(900);
+  const uint32_t rebinding_seconds = htonl(1575);
+  AddOption(&packet, 58, &renewal_seconds, 4);
+  AddOption(&packet, 59, &rebinding_seconds, 4);
+  IN_ADDR broadcast_address{};
+  const std::string broadcast_ip =
+      server_ip.substr(0, server_ip.rfind('.') + 1) + "255";
+  InetPtonA(AF_INET, broadcast_ip.c_str(), &broadcast_address);
+  AddOption(&packet, 28, &broadcast_address.S_un.S_addr, 4);
   packet.push_back(255);
   packet.resize(std::max<size_t>(packet.size(), 300), 0);
   return packet;
@@ -358,6 +386,18 @@ int RunHelper(int argc, wchar_t** argv) {
   BOOL broadcast = TRUE;
   setsockopt(socket_handle, SOL_SOCKET, SO_BROADCAST,
              reinterpret_cast<const char*>(&broadcast), sizeof(broadcast));
+  // Keep DHCP replies on the adapter selected by the user. Limited broadcasts
+  // can otherwise be routed through Wi-Fi, a VPN or a virtual switch.
+  const DWORD outgoing_interface = htonl(arguments.adapter_index);
+  if (setsockopt(socket_handle, IPPROTO_IP, IP_UNICAST_IF,
+                 reinterpret_cast<const char*>(&outgoing_interface),
+                 sizeof(outgoing_interface)) == SOCKET_ERROR) {
+    AppendLog(arguments, "WARNING: IP_UNICAST_IF failed; WSA error=" +
+                             std::to_string(WSAGetLastError()));
+  } else {
+    AppendLog(arguments, "DHCP replies pinned to adapter ifIndex=" +
+                             std::to_string(arguments.adapter_index));
+  }
   sockaddr_in local{};
   local.sin_family = AF_INET;
   local.sin_port = htons(67);
@@ -468,7 +508,12 @@ int RunHelper(int argc, wchar_t** argv) {
         reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
         reinterpret_cast<sockaddr*>(&remote), &remote_length);
     DhcpRequest request;
-    if (received <= 0 || !ParseDhcp(buffer.data(), received, &request)) continue;
+    if (received <= 0) continue;
+    if (!ParseDhcp(buffer.data(), received, &request)) {
+      AppendLog(arguments, "Ignored unrecognized UDP/67 datagram; bytes=" +
+                               std::to_string(received));
+      continue;
+    }
     last_mac = FormatMac(request.mac);
     last_hostname = request.hostname;
     if (has_interface_mac && request.mac == interface_mac) {
@@ -484,26 +529,40 @@ int RunHelper(int argc, wchar_t** argv) {
     external_dhcp_seen = true;
     AppendLog(arguments, "Received DHCP message type=" +
                              std::to_string(request.type) + "; mac=" + last_mac +
-                             "; hostname=" + last_hostname);
+                             "; hostname=" + last_hostname +
+                             "; clientId=" + request.client_id +
+                             "; requestedIp=" + request.requested_ip +
+                             "; serverId=" + request.server_identifier);
     const uint8_t response_type = request.type == 1 ? 2 : 5;
     const auto response = BuildReply(buffer.data(), received, response_type, server_ip, lease_ip);
-    sockaddr_in destination{};
-    destination.sin_family = AF_INET;
-    destination.sin_port = htons(68);
-    destination.sin_addr.s_addr = INADDR_BROADCAST;
-    const int sent = sendto(socket_handle,
-                            reinterpret_cast<const char*>(response.data()),
-                            static_cast<int>(response.size()), 0,
-                            reinterpret_cast<sockaddr*>(&destination),
-                            sizeof(destination));
-    if (sent == SOCKET_ERROR) {
-      AppendLog(arguments, "sendto() failed; WSA error=" +
-                               std::to_string(WSAGetLastError()));
-    } else {
-      AppendLog(arguments, response_type == 2 ? "Sent DHCP OFFER"
-                                              : "Sent DHCP ACK");
+    const std::array<std::string, 2> destinations = {
+        "255.255.255.255", ReplaceLastOctet(network, 255)};
+    bool reply_sent = false;
+    for (int repetition = 1; repetition <= 2; ++repetition) {
+      for (const auto& destination_ip : destinations) {
+        sockaddr_in destination{};
+        destination.sin_family = AF_INET;
+        destination.sin_port = htons(68);
+        InetPtonA(AF_INET, destination_ip.c_str(), &destination.sin_addr);
+        const int sent = sendto(socket_handle,
+            reinterpret_cast<const char*>(response.data()),
+            static_cast<int>(response.size()), 0,
+            reinterpret_cast<sockaddr*>(&destination), sizeof(destination));
+        if (sent == SOCKET_ERROR) {
+          AppendLog(arguments, "sendto(" + destination_ip + ") failed; WSA error=" +
+                                   std::to_string(WSAGetLastError()));
+        } else {
+          reply_sent = true;
+        }
+      }
+      if (repetition == 1) Sleep(120);
     }
-    if (response_type == 5 && sent != SOCKET_ERROR) {
+    if (reply_sent) {
+      AppendLog(arguments, std::string(response_type == 2 ? "Sent DHCP OFFER"
+                                                          : "Sent DHCP ACK") +
+                               " via limited and directed broadcast (2x)");
+    }
+    if (response_type == 5 && reply_sent) {
       WriteState(arguments, "leased", "已为 HAOS 分配地址，正在检测 8123 服务…",
                  server_ip, lease_ip, last_mac, last_hostname);
     }
