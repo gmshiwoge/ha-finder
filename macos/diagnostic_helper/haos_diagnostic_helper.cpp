@@ -210,19 +210,21 @@ int main(int argc, char** argv) {
     Log(args, "DHCP socket pinned to interface index=" + std::to_string(interface_index));
   else Log(args, "WARNING: IP_BOUND_IF failed; errno=" + std::to_string(errno));
 #endif
+  // DHCP clients do not have an address yet and send DISCOVER to the limited
+  // broadcast address. On Darwin, a UDP socket bound only to the alias address
+  // can miss those packets, so receive on all addresses while IP_BOUND_IF keeps
+  // traffic restricted to the selected Ethernet interface.
   sockaddr_in local{}; local.sin_family = AF_INET; local.sin_port = htons(67);
-  inet_pton(AF_INET, server_ip.c_str(), &local.sin_addr);
+  local.sin_addr.s_addr = INADDR_ANY;
   if (socket_fd < 0 || bind(socket_fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
     Log(args, "bind failed; errno=" + std::to_string(errno));
     State(args, "error", "无法监听 DHCP UDP 67 端口。", server_ip); Run(remove); return 5;
   }
-  Log(args, "DHCP socket listening on " + server_ip + ":67");
-  State(args, "configuring", "正在重新建立网线连接，触发 HAOS 请求 IP…", server_ip);
-  Run("/sbin/ifconfig " + ShellQuote(args.interface) + " down");
-  std::this_thread::sleep_for(std::chrono::seconds(5));
-  Run("/sbin/ifconfig " + ShellQuote(args.interface) + " up");
-  Run(add);
-  Log(args, "Ethernet interface link cycle completed");
+  Log(args, "DHCP socket listening on 0.0.0.0:67; server=" + server_ip);
+  // Do not administratively cycle a macOS interface here. Some Ethernet and
+  // USB drivers block inside ifconfig down/up, leaving the UI in configuring.
+  // HAOS will retry DHCP itself, and physically reconnecting the cable triggers
+  // an immediate request without risking the Mac's original network state.
   State(args, "waiting_dhcp", "诊断网络已建立，等待 HAOS 请求 IP…", server_ip);
 
   std::array<uint8_t, 1600> buffer{};
@@ -235,7 +237,14 @@ int main(int argc, char** argv) {
     const int received = recvfrom(socket_fd, buffer.data(), buffer.size(), 0,
         reinterpret_cast<sockaddr*>(&remote), &remote_size);
     Request request;
-    if (received <= 0 || !ParseDhcp(buffer.data(), received, &request)) continue;
+    if (received <= 0) continue;
+    char remote_ip[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &remote.sin_addr, remote_ip, sizeof(remote_ip));
+    if (!ParseDhcp(buffer.data(), received, &request)) {
+      Log(args, "Ignored UDP/67 datagram; bytes=" + std::to_string(received) +
+          "; source=" + remote_ip);
+      continue;
+    }
     last_mac = Hex(request.mac.data(), request.mac.size()); last_hostname = request.hostname;
     Log(args, "Received DHCP type=" + std::to_string(request.type) + "; mac=" + last_mac +
         "; hostname=" + last_hostname + "; clientId=" + request.client_id +
