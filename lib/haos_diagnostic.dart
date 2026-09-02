@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'home_assistant_discovery.dart';
+
 class DiagnosticAdapter {
   const DiagnosticAdapter({
     required this.name,
@@ -68,11 +70,13 @@ class HaosDiagnosticController extends ChangeNotifier {
   bool loadingAdapters = false;
   bool running = false;
   bool haReady = false;
-  String? verifiedDeviceIp;
+  HaInstance? verifiedInstance;
   String? error;
   Timer? _pollTimer;
   Timer? _haProbeTimer;
+  bool _discoveryRunning = false;
   bool _cancelRequested = false;
+  final HomeAssistantDiscovery _discovery = HomeAssistantDiscovery();
 
   Directory get _sessionDirectory => Directory(
     '${Directory.systemTemp.path}${Platform.pathSeparator}ha_finder_diagnostic',
@@ -86,7 +90,7 @@ class HaosDiagnosticController extends ChangeNotifier {
   File get _foundFile =>
       File('${_sessionDirectory.path}${Platform.pathSeparator}device.found');
 
-  String? get deviceIp => verifiedDeviceIp ?? snapshot.deviceIp;
+  String? get deviceIp => verifiedInstance?.host ?? snapshot.deviceIp;
 
   Future<void> _appendLog(String message) async {
     await _sessionDirectory.create(recursive: true);
@@ -157,7 +161,7 @@ ConvertTo-Json -Compress''';
     if (!Platform.isWindows || adapter == null || running) return;
     error = null;
     haReady = false;
-    verifiedDeviceIp = null;
+    verifiedInstance = null;
     running = true;
     snapshot = const DiagnosticSnapshot(
       stage: 'authorization',
@@ -239,7 +243,6 @@ ConvertTo-Json -Compress''';
       snapshot = DiagnosticSnapshot.fromJson(
         Map<String, dynamic>.from(decoded),
       );
-      if (snapshot.deviceIp != null) verifiedDeviceIp = snapshot.deviceIp;
       if (snapshot.serverIp != null &&
           (snapshot.stage == 'configuring' ||
               snapshot.stage == 'waiting_dhcp' ||
@@ -279,60 +282,56 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
 
   void _startHaProbe() {
     if (_haProbeTimer != null || haReady) return;
-    unawaited(_probeHa());
+    unawaited(_discoverHa());
     _haProbeTimer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => unawaited(_probeHa()),
+      const Duration(seconds: 8),
+      (_) => unawaited(_discoverHa()),
     );
   }
 
-  Future<void> _probeHa() async {
-    final address = deviceIp ?? _candidateLeaseAddress();
-    if (address == null || haReady) return;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+  Future<void> _discoverHa() async {
+    if (_discoveryRunning || haReady) return;
+    _discoveryRunning = true;
     try {
-      final request = await client
-          .getUrl(Uri.parse('http://$address:8123/'))
-          .timeout(const Duration(seconds: 3));
-      final response = await request.close().timeout(
-        const Duration(seconds: 3),
-      );
-      final body = await response
-          .transform(utf8.decoder)
-          .join()
-          .timeout(const Duration(seconds: 3));
-      if (body.toLowerCase().contains('<title>home assistant</title>') ||
-          body.toLowerCase().contains(
-            'application-name" content="home assistant',
-          )) {
-        verifiedDeviceIp = address;
+      HaInstance? instance;
+      final leasedAddress = snapshot.deviceIp;
+      if (leasedAddress != null) {
+        instance = await _discovery.probeHost(leasedAddress);
+      }
+      final subnet = _diagnosticSubnet();
+      if (instance == null && subnet != null) {
+        final instances = await _discovery.discoverDiagnosticSubnet(subnet);
+        if (instances.isNotEmpty) instance = instances.first;
+      }
+      if (instance != null) {
+        verifiedInstance = instance;
         haReady = true;
-        await _foundFile.writeAsString(address, flush: true);
-        await _appendLog('通过 HTTP 8123 兜底确认 Home Assistant：$address');
+        await _foundFile.writeAsString(instance.host, flush: true);
+        await _appendLog('通过共享发现确认 Home Assistant：${instance.url}');
         _haProbeTimer?.cancel();
         _haProbeTimer = null;
         notifyListeners();
       }
     } on Object {
-      // HAOS may have a lease before Home Assistant has finished booting.
+      // The next discovery pass retries mDNS and enhanced subnet scanning.
     } finally {
-      client.close(force: true);
+      _discoveryRunning = false;
     }
   }
 
-  String? _candidateLeaseAddress() {
+  String? _diagnosticSubnet() {
     final server = snapshot.serverIp;
     if (server == null) return null;
     final separator = server.lastIndexOf('.');
     if (separator < 0) return null;
-    return '${server.substring(0, separator)}.2';
+    return server.substring(0, separator);
   }
 
   Future<void> openHa() async {
-    final address = deviceIp;
-    if (address == null) return;
+    final instance = verifiedInstance;
+    if (instance == null) return;
     await launchUrl(
-      Uri.parse('http://$address:8123'),
+      Uri.parse(instance.url),
       mode: LaunchMode.externalApplication,
     );
   }
@@ -637,7 +636,7 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
           _StatusRow(
             label: 'Home Assistant',
             value: controller.haReady
-                ? '8123 服务正常'
+                ? '${controller.verifiedInstance?.port ?? ''} 服务正常'
                 : controller.deviceIp != null
                 ? '等待服务启动…'
                 : '等待发现设备',

@@ -8,6 +8,7 @@ import 'package:multicast_dns/multicast_dns.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'haos_diagnostic.dart';
+import 'home_assistant_discovery.dart' as shared;
 
 void main() => runApp(const HaFinderApp());
 
@@ -239,8 +240,8 @@ class FinderPage extends StatefulWidget {
 }
 
 class _FinderPageState extends State<FinderPage> {
-  final _discovery = HomeAssistantDiscovery();
-  List<HaInstance> _instances = const [];
+  final _discovery = shared.HomeAssistantDiscovery();
+  List<shared.HaInstance> _instances = const [];
   bool _searching = false;
   bool _enhanced = false;
   String? _progress;
@@ -298,7 +299,7 @@ class _FinderPageState extends State<FinderPage> {
           setState(() => _progress = '正在探测局域网：$checked / $total');
         },
       );
-      final merged = <String, HaInstance>{};
+      final merged = <String, shared.HaInstance>{};
       for (final instance in [...instances, ...existing]) {
         merged['${instance.host}:${instance.port}'] = instance;
       }
@@ -343,7 +344,7 @@ class _FinderPageState extends State<FinderPage> {
     });
   }
 
-  Future<void> _open(HaInstance instance) async {
+  Future<void> _open(shared.HaInstance instance) async {
     final opened = await launchUrl(
       Uri.parse(instance.url),
       mode: LaunchMode.externalApplication,
@@ -355,7 +356,7 @@ class _FinderPageState extends State<FinderPage> {
     }
   }
 
-  Future<void> _copy(HaInstance instance) async {
+  Future<void> _copy(shared.HaInstance instance) async {
     await Clipboard.setData(ClipboardData(text: instance.url));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -594,7 +595,7 @@ class _ServerCard extends StatelessWidget {
     required this.onOpen,
     required this.onCopy,
   });
-  final HaInstance instance;
+  final shared.HaInstance instance;
   final VoidCallback onOpen;
   final VoidCallback onCopy;
 
