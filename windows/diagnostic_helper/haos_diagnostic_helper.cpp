@@ -277,8 +277,6 @@ int wmain(int argc, wchar_t** argv) {
     AppendLog(arguments, "WARNING: failed to add Windows Firewall rule");
   }
 
-  Sleep(1000);
-
   WSADATA winsock{};
   SOCKET socket_handle = INVALID_SOCKET;
   bool winsock_started = WSAStartup(MAKEWORD(2, 2), &winsock) == 0;
@@ -300,10 +298,40 @@ int wmain(int argc, wchar_t** argv) {
   local.sin_family = AF_INET;
   local.sin_port = htons(67);
   InetPtonA(AF_INET, server_ip.c_str(), &local.sin_addr);
-  if (bind(socket_handle, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == SOCKET_ERROR) {
-    AppendLog(arguments, "bind(" + server_ip + ":67) failed; WSA error=" +
-                             std::to_string(WSAGetLastError()));
-    WriteState(arguments, "error", "UDP 67 端口被占用，无法启动 DHCP。", server_ip);
+  int bind_error = 0;
+  bool bound = false;
+  WriteState(arguments, "configuring", "等待 Windows 启用临时 IP…", server_ip);
+  for (int attempt = 1; attempt <= 40 && !fs::exists(arguments.stop_file);
+       ++attempt) {
+    if (bind(socket_handle, reinterpret_cast<sockaddr*>(&local), sizeof(local)) !=
+        SOCKET_ERROR) {
+      bound = true;
+      if (attempt > 1) {
+        AppendLog(arguments, "Address became available after " +
+                                 std::to_string(attempt) + " bind attempts");
+      }
+      break;
+    }
+    bind_error = WSAGetLastError();
+    if (attempt == 1 || attempt % 10 == 0) {
+      AppendLog(arguments, "bind(" + server_ip + ":67) attempt=" +
+                               std::to_string(attempt) + "; WSA error=" +
+                               std::to_string(bind_error));
+    }
+    // WSAEADDRNOTAVAIL means Windows is still completing duplicate-address
+    // detection for the newly-added secondary IP. Other failures will not be
+    // repaired by waiting.
+    if (bind_error != WSAEADDRNOTAVAIL) break;
+    Sleep(500);
+  }
+  if (!bound) {
+    AppendLog(arguments, "bind(" + server_ip + ":67) ultimately failed; WSA error=" +
+                             std::to_string(bind_error));
+    const std::string message = bind_error == WSAEADDRINUSE
+        ? "UDP 67 端口被其他程序占用，无法启动 DHCP。"
+        : "Windows 未能启用临时诊断 IP（WSA " +
+              std::to_string(bind_error) + "）。";
+    WriteState(arguments, "error", message, server_ip);
     closesocket(socket_handle);
     WSACleanup();
     RunHidden(delete_firewall);
