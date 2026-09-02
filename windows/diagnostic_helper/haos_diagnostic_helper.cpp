@@ -406,28 +406,49 @@ int RunHelper(int argc, wchar_t** argv) {
   // this server was ready, then wait a long time before retrying. Cycle only
   // the selected Ethernet adapter after the socket is listening so HAOS sees
   // a fresh carrier transition and requests an address immediately.
-  WriteState(arguments, "configuring", "正在重新建立网线连接，触发 HAOS 请求 IP…",
-             server_ip);
-  AppendLog(arguments, "Cycling selected Ethernet adapter to trigger a fresh DHCP request");
-  if (SetInterfaceEnabled(arguments.adapter_index, false)) {
-    Sleep(1500);
-    if (SetInterfaceEnabled(arguments.adapter_index, true)) {
-      AppendLog(arguments, "Ethernet adapter link cycle completed");
+  int link_cycle_count = 0;
+  ULONGLONG last_link_cycle = 0;
+  const auto cycle_interface = [&]() {
+    ++link_cycle_count;
+    WriteState(arguments, "configuring",
+               "正在重新建立网线连接，触发 HAOS 请求 IP…", server_ip);
+    AppendLog(arguments, "Cycling selected Ethernet adapter for 5 seconds; cycle=" +
+                             std::to_string(link_cycle_count));
+    if (SetInterfaceEnabled(arguments.adapter_index, false)) {
+      Sleep(5000);
+      if (SetInterfaceEnabled(arguments.adapter_index, true)) {
+        AppendLog(arguments, "Ethernet adapter link cycle completed");
+      } else {
+        AppendLog(arguments,
+                  "WARNING: failed to re-enable selected Ethernet adapter");
+      }
     } else {
-      AppendLog(arguments, "WARNING: failed to re-enable selected Ethernet adapter");
+      AppendLog(arguments,
+                "WARNING: failed to disable selected Ethernet adapter");
     }
-  } else {
-    AppendLog(arguments, "WARNING: failed to disable selected Ethernet adapter");
-  }
+    last_link_cycle = GetTickCount64();
+    WriteState(arguments, "waiting_dhcp",
+               "诊断网络已建立，等待 HAOS 请求 IP…", server_ip);
+  };
+  cycle_interface();
 
   HANDLE parent = arguments.parent_pid == 0 ? nullptr :
       OpenProcess(SYNCHRONIZE, FALSE, arguments.parent_pid);
   WriteState(arguments, "waiting_dhcp", "诊断网络已建立，等待 HAOS 请求 IP…", server_ip);
   std::string last_mac;
   std::string last_hostname;
+  bool external_dhcp_seen = false;
+  int ignored_host_requests = 0;
   std::array<uint8_t, 1500> buffer{};
   while (!fs::exists(arguments.stop_file) &&
          (!parent || WaitForSingleObject(parent, 0) == WAIT_TIMEOUT)) {
+    if (!external_dhcp_seen && link_cycle_count < 3 &&
+        GetTickCount64() - last_link_cycle >= 30000) {
+      AppendLog(arguments,
+                "No DHCP from an external device after 30 seconds; retrying link cycle");
+      cycle_interface();
+      continue;
+    }
     fd_set readers;
     FD_ZERO(&readers);
     FD_SET(socket_handle, &readers);
@@ -443,10 +464,16 @@ int RunHelper(int argc, wchar_t** argv) {
     last_mac = FormatMac(request.mac);
     last_hostname = request.hostname;
     if (has_interface_mac && request.mac == interface_mac) {
-      AppendLog(arguments, "Ignored DHCP request from this Windows adapter; mac=" +
-                               last_mac + "; hostname=" + last_hostname);
+      ++ignored_host_requests;
+      if (ignored_host_requests == 1 || ignored_host_requests % 10 == 0) {
+        AppendLog(arguments, "Ignored DHCP request from this Windows adapter; count=" +
+                                 std::to_string(ignored_host_requests) +
+                                 "; mac=" + last_mac +
+                                 "; hostname=" + last_hostname);
+      }
       continue;
     }
+    external_dhcp_seen = true;
     AppendLog(arguments, "Received DHCP message type=" +
                              std::to_string(request.type) + "; mac=" + last_mac +
                              "; hostname=" + last_hostname);
