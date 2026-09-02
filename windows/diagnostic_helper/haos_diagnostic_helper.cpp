@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <array>
@@ -121,6 +122,35 @@ bool RunHidden(const std::wstring& command) {
   return exit_code == 0;
 }
 
+DWORD AddDiagnosticAddress(unsigned long interface_index,
+                           const std::string& address,
+                           bool* address_created) {
+  MIB_UNICASTIPADDRESS_ROW row{};
+  InitializeUnicastIpAddressEntry(&row);
+  row.InterfaceIndex = interface_index;
+  row.Address.Ipv4.sin_family = AF_INET;
+  InetPtonA(AF_INET, address.c_str(), &row.Address.Ipv4.sin_addr);
+  row.OnLinkPrefixLength = 24;
+  row.PrefixOrigin = IpPrefixOriginManual;
+  row.SuffixOrigin = IpSuffixOriginManual;
+  const DWORD result = CreateUnicastIpAddressEntry(&row);
+  *address_created = result == NO_ERROR;
+  return result;
+}
+
+bool RemoveDiagnosticAddress(unsigned long interface_index,
+                             const std::string& address,
+                             bool address_created) {
+  if (!address_created) return true;
+  MIB_UNICASTIPADDRESS_ROW row{};
+  InitializeUnicastIpAddressEntry(&row);
+  row.InterfaceIndex = interface_index;
+  row.Address.Ipv4.sin_family = AF_INET;
+  InetPtonA(AF_INET, address.c_str(), &row.Address.Ipv4.sin_addr);
+  if (GetUnicastIpAddressEntry(&row) != NO_ERROR) return false;
+  return DeleteUnicastIpAddressEntry(&row) == NO_ERROR;
+}
+
 bool RouteOverlaps(uint32_t network_host_order) {
   PMIB_IPFORWARD_TABLE2 table = nullptr;
   if (GetIpForwardTable2(AF_INET, &table) != NO_ERROR) return false;
@@ -231,7 +261,7 @@ std::string FormatMac(const std::array<uint8_t, 6>& mac) {
   return output.str();
 }
 
-int wmain(int argc, wchar_t** argv) {
+int RunHelper(int argc, wchar_t** argv) {
   Arguments arguments;
   if (!ParseArguments(argc, argv, &arguments)) return 2;
   AppendLog(arguments, "Helper started; adapter ifIndex=" +
@@ -253,23 +283,25 @@ int wmain(int argc, wchar_t** argv) {
   WriteState(arguments, "configuring", "正在配置临时诊断网络…", server_ip);
 
   const std::wstring index = std::to_wstring(arguments.adapter_index);
-  const std::wstring server(server_ip.begin(), server_ip.end());
-  const std::wstring add_address = L"netsh interface ipv4 add address name=" + index +
-      L" address=" + server + L" mask=255.255.255.0 store=active";
-  const std::wstring delete_address = L"netsh interface ipv4 delete address name=" + index +
-      L" address=" + server;
   const std::wstring firewall_name = L"HA Finder Diagnostic DHCP";
   const std::wstring add_firewall = L"netsh advfirewall firewall add rule name=\"" + firewall_name +
       L"\" dir=in action=allow protocol=UDP localport=67 profile=any";
   const std::wstring delete_firewall = L"netsh advfirewall firewall delete rule name=\"" +
       firewall_name + L"\"";
 
-  if (!RunHidden(add_address)) {
-    AppendLog(arguments, "netsh add address failed");
+  bool address_created = false;
+  const DWORD add_address_result = AddDiagnosticAddress(
+      arguments.adapter_index, server_ip, &address_created);
+  if (add_address_result != NO_ERROR &&
+      add_address_result != ERROR_OBJECT_ALREADY_EXISTS) {
+    AppendLog(arguments, "CreateUnicastIpAddressEntry failed; error=" +
+                             std::to_string(add_address_result));
     WriteState(arguments, "error", "无法为所选网卡添加临时 IP。", server_ip);
     return 4;
   }
-  AppendLog(arguments, "Temporary address added successfully");
+  AppendLog(arguments, address_created
+                           ? "Temporary address added with Windows IP Helper; original DHCP/static configuration unchanged"
+                           : "Diagnostic address already existed; original configuration unchanged");
   RunHidden(delete_firewall);
   if (RunHidden(add_firewall)) {
     AppendLog(arguments, "Windows Firewall UDP 67 rule added");
@@ -286,7 +318,7 @@ int wmain(int argc, wchar_t** argv) {
                              std::to_string(WSAGetLastError()));
     WriteState(arguments, "error", "无法启动 DHCP 网络服务。", server_ip);
     RunHidden(delete_firewall);
-    RunHidden(delete_address);
+    RemoveDiagnosticAddress(arguments.adapter_index, server_ip, address_created);
     if (winsock_started) WSACleanup();
     return 5;
   }
@@ -335,7 +367,7 @@ int wmain(int argc, wchar_t** argv) {
     closesocket(socket_handle);
     WSACleanup();
     RunHidden(delete_firewall);
-    RunHidden(delete_address);
+    RemoveDiagnosticAddress(arguments.adapter_index, server_ip, address_created);
     return 6;
   }
   AppendLog(arguments, "DHCP socket listening on " + server_ip + ":67");
@@ -417,11 +449,24 @@ int wmain(int argc, wchar_t** argv) {
   closesocket(socket_handle);
   WSACleanup();
   RunHidden(delete_firewall);
-  const bool address_removed = RunHidden(delete_address);
+  // Always leave the selected adapter enabled, even when the main Flutter
+  // window was closed during the link-cycle operation.
+  RunHidden(enable_interface);
+  const bool address_removed = RemoveDiagnosticAddress(
+      arguments.adapter_index, server_ip, address_created);
   AppendLog(arguments, address_removed ? "Temporary address removed; cleanup complete"
                                        : "WARNING: failed to remove temporary address");
   fs::remove(arguments.stop_file, ignored);
   WriteState(arguments, "stopped", "诊断已停止，临时网络设置已清理。",
              {}, last_mac.empty() ? "" : lease_ip, last_mac, last_hostname);
   return 0;
+}
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  int argument_count = 0;
+  wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+  if (!arguments) return 2;
+  const int result = RunHelper(argument_count, arguments);
+  LocalFree(arguments);
+  return result;
 }
