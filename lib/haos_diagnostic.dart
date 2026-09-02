@@ -299,7 +299,7 @@ ConvertTo-Json -Compress''';
   Future<void> _startMacHelper(DiagnosticAdapter adapter) async {
     final executableDirectory = File(Platform.resolvedExecutable).parent;
     final helper = File(
-      '${executableDirectory.parent.path}/Resources/haos_diagnostic_helper',
+      '${executableDirectory.parent.path}/Helpers/haos_diagnostic_helper',
     );
     if (!await helper.exists()) {
       throw Exception('没有找到 macOS 诊断 Helper，请重新安装最新版 HA Finder。');
