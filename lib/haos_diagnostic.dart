@@ -455,22 +455,29 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
     if (controller.loadingAdapters) {
       return const LinearProgressIndicator();
     }
-    return DropdownButtonFormField<DiagnosticAdapter>(
-      value: controller.selectedAdapter,
+    return InputDecorator(
       decoration: const InputDecoration(
         labelText: '连接 HAOS 的有线网卡',
         border: OutlineInputBorder(),
         prefixIcon: Icon(Icons.settings_ethernet),
       ),
-      items: controller.adapters
-          .map(
-            (adapter) => DropdownMenuItem(
-              value: adapter,
-              child: Text('${adapter.name}  ${adapter.speed}'),
-            ),
-          )
-          .toList(),
-      onChanged: controller.running ? null : controller.selectAdapter,
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<DiagnosticAdapter>(
+          value: controller.selectedAdapter,
+          isDense: true,
+          isExpanded: true,
+          hint: const Text('请选择有线网卡'),
+          items: controller.adapters
+              .map(
+                (adapter) => DropdownMenuItem(
+                  value: adapter,
+                  child: Text('${adapter.name}  ${adapter.speed}'),
+                ),
+              )
+              .toList(),
+          onChanged: controller.running ? null : controller.selectAdapter,
+        ),
+      ),
     );
   }
 
