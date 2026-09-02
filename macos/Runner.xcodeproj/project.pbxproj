@@ -240,6 +240,7 @@
 				33CC10EB2044A3C60003C045 /* Resources */,
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
+				A17D1A1026F9000100AA0001 /* Build Diagnostic Helper */,
 				645ED3B8C21C6E87058324E8 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
@@ -323,6 +324,24 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		A17D1A1026F9000100AA0001 /* Build Diagnostic Helper */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(PROJECT_DIR)/diagnostic_helper/haos_diagnostic_helper.cpp",
+				"$(PROJECT_DIR)/build_diagnostic_helper.sh",
+			);
+			name = "Build Diagnostic Helper";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/haos_diagnostic_helper",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$PROJECT_DIR/build_diagnostic_helper.sh\"\n";
+		};
 		3399D490228B24CF009A79C7 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;

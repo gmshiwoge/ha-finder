@@ -102,12 +102,16 @@ class HaosDiagnosticController extends ChangeNotifier {
   }
 
   Future<void> loadAdapters() async {
-    if (!Platform.isWindows) return;
+    if (!Platform.isWindows && !Platform.isMacOS) return;
     loadingAdapters = true;
     error = null;
     _cancelRequested = false;
     notifyListeners();
     try {
+      if (Platform.isMacOS) {
+        await _loadMacAdapters();
+        return;
+      }
       const command = r'''Get-NetAdapter -Physical |
 Where-Object {
   $_.Status -eq 'Up' -and
@@ -151,6 +155,48 @@ ConvertTo-Json -Compress''';
     }
   }
 
+  Future<void> _loadMacAdapters() async {
+    final result = await Process.run(
+      '/usr/sbin/networksetup',
+      const ['-listallhardwareports'],
+    );
+    if (result.exitCode != 0) {
+      throw Exception(result.stderr.toString().trim());
+    }
+    final blocks = result.stdout.toString().split(RegExp(r'\n\s*\n'));
+    final found = <DiagnosticAdapter>[];
+    for (final block in blocks) {
+      final port = RegExp(r'Hardware Port:\s*(.+)').firstMatch(block)?.group(1);
+      final device = RegExp(r'Device:\s*(\S+)').firstMatch(block)?.group(1);
+      if (port == null || device == null) continue;
+      final lower = port.toLowerCase();
+      if (!lower.contains('ethernet') &&
+          !lower.contains('lan') &&
+          !lower.contains('usb')) {
+        continue;
+      }
+      var speed = '';
+      final details = await Process.run('/sbin/ifconfig', [device]);
+      final media = RegExp(
+        r'media:\s*([^\n]+)',
+      ).firstMatch(details.stdout.toString())?.group(1);
+      if (media != null) speed = media.trim();
+      found.add(
+        DiagnosticAdapter(
+          name: device,
+          description: port.trim(),
+          index: found.length + 1,
+          speed: speed,
+        ),
+      );
+    }
+    adapters = found;
+    selectedAdapter = adapters.length == 1 ? adapters.first : null;
+    if (adapters.isEmpty) {
+      error = '未检测到有线网卡。请连接 USB/雷雳转网口后重新检测。';
+    }
+  }
+
   void selectAdapter(DiagnosticAdapter? adapter) {
     selectedAdapter = adapter;
     notifyListeners();
@@ -158,14 +204,20 @@ ConvertTo-Json -Compress''';
 
   Future<void> start() async {
     final adapter = selectedAdapter;
-    if (!Platform.isWindows || adapter == null || running) return;
+    if ((!Platform.isWindows && !Platform.isMacOS) ||
+        adapter == null ||
+        running) {
+      return;
+    }
     error = null;
     haReady = false;
     verifiedInstance = null;
     running = true;
-    snapshot = const DiagnosticSnapshot(
+    snapshot = DiagnosticSnapshot(
       stage: 'authorization',
-      message: '请在 Windows 管理员授权窗口中选择“是”…',
+      message: Platform.isMacOS
+          ? '请在 macOS 授权窗口中输入管理员密码…'
+          : '请在 Windows 管理员授权窗口中选择“是”…',
     );
     notifyListeners();
 
@@ -175,6 +227,10 @@ ConvertTo-Json -Compress''';
       }
       await _sessionDirectory.create(recursive: true);
       await _appendLog('开始诊断，网卡=${adapter.name}，ifIndex=${adapter.index}');
+      if (Platform.isMacOS) {
+        await _startMacHelper(adapter);
+        return;
+      }
       final executableDirectory = File(Platform.resolvedExecutable).parent.path;
       final helper = '$executableDirectory\\haos_diagnostic_helper.exe';
       if (!await File(helper).exists()) {
@@ -233,6 +289,54 @@ ConvertTo-Json -Compress''';
       snapshot = const DiagnosticSnapshot(stage: 'error', message: '诊断模式启动失败。');
       notifyListeners();
     }
+  }
+
+  String _shellQuote(String value) => "'${value.replaceAll("'", "'\\''")}'";
+
+  String _appleScriptQuote(String value) =>
+      '"${value.replaceAll(r'\', r'\\').replaceAll('"', r'\"')}"';
+
+  Future<void> _startMacHelper(DiagnosticAdapter adapter) async {
+    final executableDirectory = File(Platform.resolvedExecutable).parent;
+    final helper = File(
+      '${executableDirectory.parent.path}/Resources/haos_diagnostic_helper',
+    );
+    if (!await helper.exists()) {
+      throw Exception('没有找到 macOS 诊断 Helper，请重新安装最新版 HA Finder。');
+    }
+    final command = <String>[
+      _shellQuote(helper.path),
+      '--interface',
+      _shellQuote(adapter.name),
+      '--state',
+      _shellQuote(_stateFile.path),
+      '--stop',
+      _shellQuote(_stopFile.path),
+      '--log',
+      _shellQuote(_logFile.path),
+      '--found',
+      _shellQuote(_foundFile.path),
+      '--parent-pid',
+      '$pid',
+      '</dev/null >/dev/null 2>&1 &',
+    ].join(' ');
+    final script =
+        'do shell script ${_appleScriptQuote(command)} with administrator privileges';
+    final result = await Process.run('/usr/bin/osascript', ['-e', script]);
+    if (result.exitCode != 0) {
+      await _appendLog(
+        'macOS Helper 授权或启动失败：${result.stderr.toString().trim()}',
+      );
+      throw Exception('管理员授权被取消或 macOS Helper 无法启动。');
+    }
+    if (_cancelRequested) {
+      await _stopFile.writeAsString('stop', flush: true);
+      return;
+    }
+    _pollTimer = Timer.periodic(
+      const Duration(milliseconds: 600),
+      (_) => unawaited(_pollState()),
+    );
   }
 
   Future<void> _pollState() async {
@@ -464,7 +568,7 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
                   ],
                 ),
                 const SizedBox(height: 22),
-                if (!Platform.isWindows) ...[
+                if (!Platform.isWindows && !Platform.isMacOS) ...[
                   const _InfoBox(
                     icon: Icons.info_outline,
                     text:
@@ -474,7 +578,7 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
                   const _InfoBox(
                     icon: Icons.warning_amber_rounded,
                     text:
-                        '请先用网线将电脑与 HAOS 直连。开始后会申请管理员权限、添加临时 IP 并启动 DHCP；停止或退出时自动恢复。',
+                        '请先用网线将电脑与 HAOS 直连。开始后会申请管理员权限、添加临时 IP 并启动 DHCP；停止或退出时自动清理。',
                   ),
                   const SizedBox(height: 18),
                   _adapterSelector(),
