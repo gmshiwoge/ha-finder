@@ -156,6 +156,7 @@ ConvertTo-Json -Compress''';
   }
 
   Future<void> _loadMacAdapters() async {
+    final previousDevice = selectedAdapter?.name;
     final result = await Process.run(
       '/usr/sbin/networksetup',
       const ['-listallhardwareports'],
@@ -191,10 +192,41 @@ ConvertTo-Json -Compress''';
       );
     }
     adapters = found;
-    selectedAdapter = adapters.length == 1 ? adapters.first : null;
+    final previousMatches = adapters
+        .where((adapter) => adapter.name == previousDevice)
+        .toList();
+    if (previousMatches.isNotEmpty && _macAdapterScore(previousMatches.first) > 0) {
+      selectedAdapter = previousMatches.first;
+    } else {
+      final connected = [...adapters]
+        ..sort(
+          (left, right) =>
+              _macAdapterScore(right).compareTo(_macAdapterScore(left)),
+        );
+      selectedAdapter = connected.isNotEmpty &&
+              _macAdapterScore(connected.first) > 0
+          ? connected.first
+          : adapters.length == 1
+          ? adapters.first
+          : null;
+    }
     if (adapters.isEmpty) {
       error = '未检测到有线网卡。请连接 USB/雷雳转网口后重新检测。';
     }
+  }
+
+  int _macAdapterScore(DiagnosticAdapter adapter) {
+    final media = adapter.speed.toLowerCase();
+    if (media.isEmpty || media == 'none' || media.contains('status: inactive')) {
+      return 0;
+    }
+    if (media.contains('10000base') || media.contains('10gbase')) return 10000;
+    if (media.contains('5000base') || media.contains('5gbase')) return 5000;
+    if (media.contains('2500base') || media.contains('2.5gbase')) return 2500;
+    if (media.contains('1000base')) return 1000;
+    if (media.contains('100base')) return 100;
+    if (media.contains('10base')) return 10;
+    return media.contains('base') ? 1 : 0;
   }
 
   void selectAdapter(DiagnosticAdapter? adapter) {
