@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'haos_diagnostic.dart';
+
 void main() => runApp(const HaFinderApp());
 
 class HaFinderApp extends StatelessWidget {
@@ -367,6 +369,11 @@ class _FinderPageState extends State<FinderPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+    floatingActionButton: FloatingActionButton.extended(
+      onPressed: () => showHaosDiagnostic(context),
+      icon: const Icon(Icons.cable_rounded),
+      label: const Text('HAOS 诊断助手'),
+    ),
     body: SafeArea(
       child: Center(
         child: ConstrainedBox(
