@@ -195,8 +195,9 @@ std::vector<uint8_t> BuildReply(const uint8_t* request_data, int request_length,
   packet[236] = 99; packet[237] = 130; packet[238] = 83; packet[239] = 99;
   AddOption(&packet, 53, &response_type, 1);
   AddOption(&packet, 54, &server.S_un.S_addr, 4);
-  const uint32_t mask = inet_addr("255.255.255.0");
-  AddOption(&packet, 1, &mask, 4);
+  IN_ADDR subnet_mask{};
+  InetPtonA(AF_INET, "255.255.255.0", &subnet_mask);
+  AddOption(&packet, 1, &subnet_mask.S_un.S_addr, 4);
   const uint32_t lease_seconds = htonl(1800);
   AddOption(&packet, 51, &lease_seconds, 4);
   packet.push_back(255);
