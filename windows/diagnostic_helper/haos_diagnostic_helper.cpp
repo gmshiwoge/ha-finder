@@ -151,6 +151,25 @@ bool RemoveDiagnosticAddress(unsigned long interface_index,
   return DeleteUnicastIpAddressEntry(&row) == NO_ERROR;
 }
 
+bool GetInterfaceMac(unsigned long interface_index,
+                     std::array<uint8_t, 6>* mac) {
+  MIB_IF_ROW2 row{};
+  row.InterfaceIndex = interface_index;
+  if (GetIfEntry2(&row) != NO_ERROR || row.PhysicalAddressLength < mac->size()) {
+    return false;
+  }
+  std::copy_n(row.PhysicalAddress, mac->size(), mac->begin());
+  return true;
+}
+
+bool SetInterfaceEnabled(unsigned long interface_index, bool enabled) {
+  MIB_IFROW row{};
+  row.dwIndex = interface_index;
+  row.dwAdminStatus = enabled ? MIB_IF_ADMIN_STATUS_UP
+                              : MIB_IF_ADMIN_STATUS_DOWN;
+  return SetIfEntry(&row) == NO_ERROR;
+}
+
 bool RouteOverlaps(uint32_t network_host_order) {
   PMIB_IPFORWARD_TABLE2 table = nullptr;
   if (GetIpForwardTable2(AF_INET, &table) != NO_ERROR) return false;
@@ -286,7 +305,6 @@ int RunHelper(int argc, wchar_t** argv) {
                            server_ip + "; lease=" + lease_ip);
   WriteState(arguments, "configuring", "正在配置临时诊断网络…", server_ip);
 
-  const std::wstring index = std::to_wstring(arguments.adapter_index);
   const std::wstring firewall_name = L"HA Finder Diagnostic DHCP";
   const std::wstring add_firewall = L"netsh advfirewall firewall add rule name=\"" + firewall_name +
       L"\" dir=in action=allow protocol=UDP localport=67 profile=any";
@@ -306,6 +324,14 @@ int RunHelper(int argc, wchar_t** argv) {
   AppendLog(arguments, address_created
                            ? "Temporary address added with Windows IP Helper; original DHCP/static configuration unchanged"
                            : "Diagnostic address already existed; original configuration unchanged");
+  std::array<uint8_t, 6> interface_mac{};
+  const bool has_interface_mac =
+      GetInterfaceMac(arguments.adapter_index, &interface_mac);
+  if (has_interface_mac) {
+    AppendLog(arguments, "Selected adapter MAC=" + FormatMac(interface_mac));
+  } else {
+    AppendLog(arguments, "WARNING: unable to read selected adapter MAC");
+  }
   RunHidden(delete_firewall);
   if (RunHidden(add_firewall)) {
     AppendLog(arguments, "Windows Firewall UDP 67 rule added");
@@ -380,16 +406,12 @@ int RunHelper(int argc, wchar_t** argv) {
   // this server was ready, then wait a long time before retrying. Cycle only
   // the selected Ethernet adapter after the socket is listening so HAOS sees
   // a fresh carrier transition and requests an address immediately.
-  const std::wstring disable_interface =
-      L"netsh interface set interface name=" + index + L" admin=disabled";
-  const std::wstring enable_interface =
-      L"netsh interface set interface name=" + index + L" admin=enabled";
   WriteState(arguments, "configuring", "正在重新建立网线连接，触发 HAOS 请求 IP…",
              server_ip);
   AppendLog(arguments, "Cycling selected Ethernet adapter to trigger a fresh DHCP request");
-  if (RunHidden(disable_interface)) {
+  if (SetInterfaceEnabled(arguments.adapter_index, false)) {
     Sleep(1500);
-    if (RunHidden(enable_interface)) {
+    if (SetInterfaceEnabled(arguments.adapter_index, true)) {
       AppendLog(arguments, "Ethernet adapter link cycle completed");
     } else {
       AppendLog(arguments, "WARNING: failed to re-enable selected Ethernet adapter");
@@ -420,6 +442,11 @@ int RunHelper(int argc, wchar_t** argv) {
     if (received <= 0 || !ParseDhcp(buffer.data(), received, &request)) continue;
     last_mac = FormatMac(request.mac);
     last_hostname = request.hostname;
+    if (has_interface_mac && request.mac == interface_mac) {
+      AppendLog(arguments, "Ignored DHCP request from this Windows adapter; mac=" +
+                               last_mac + "; hostname=" + last_hostname);
+      continue;
+    }
     AppendLog(arguments, "Received DHCP message type=" +
                              std::to_string(request.type) + "; mac=" + last_mac +
                              "; hostname=" + last_hostname);
@@ -441,7 +468,7 @@ int RunHelper(int argc, wchar_t** argv) {
       AppendLog(arguments, response_type == 2 ? "Sent DHCP OFFER"
                                               : "Sent DHCP ACK");
     }
-    if (response_type == 5) {
+    if (response_type == 5 && sent != SOCKET_ERROR) {
       WriteState(arguments, "leased", "已为 HAOS 分配地址，正在检测 8123 服务…",
                  server_ip, lease_ip, last_mac, last_hostname);
     }
@@ -455,7 +482,7 @@ int RunHelper(int argc, wchar_t** argv) {
   RunHidden(delete_firewall);
   // Always leave the selected adapter enabled, even when the main Flutter
   // window was closed during the link-cycle operation.
-  RunHidden(enable_interface);
+  SetInterfaceEnabled(arguments.adapter_index, true);
   const bool address_removed = RemoveDiagnosticAddress(
       arguments.adapter_index, server_ip, address_created);
   AppendLog(arguments, address_removed ? "Temporary address removed; cleanup complete"
