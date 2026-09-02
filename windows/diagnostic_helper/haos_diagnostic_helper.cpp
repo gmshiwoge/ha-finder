@@ -340,6 +340,28 @@ int wmain(int argc, wchar_t** argv) {
   }
   AppendLog(arguments, "DHCP socket listening on " + server_ip + ":67");
 
+  // The directly-connected HAOS may have sent its first DHCP DISCOVER before
+  // this server was ready, then wait a long time before retrying. Cycle only
+  // the selected Ethernet adapter after the socket is listening so HAOS sees
+  // a fresh carrier transition and requests an address immediately.
+  const std::wstring disable_interface =
+      L"netsh interface set interface name=" + index + L" admin=disabled";
+  const std::wstring enable_interface =
+      L"netsh interface set interface name=" + index + L" admin=enabled";
+  WriteState(arguments, "configuring", "正在重新建立网线连接，触发 HAOS 请求 IP…",
+             server_ip);
+  AppendLog(arguments, "Cycling selected Ethernet adapter to trigger a fresh DHCP request");
+  if (RunHidden(disable_interface)) {
+    Sleep(1500);
+    if (RunHidden(enable_interface)) {
+      AppendLog(arguments, "Ethernet adapter link cycle completed");
+    } else {
+      AppendLog(arguments, "WARNING: failed to re-enable selected Ethernet adapter");
+    }
+  } else {
+    AppendLog(arguments, "WARNING: failed to disable selected Ethernet adapter");
+  }
+
   HANDLE parent = arguments.parent_pid == 0 ? nullptr :
       OpenProcess(SYNCHRONIZE, FALSE, arguments.parent_pid);
   WriteState(arguments, "waiting_dhcp", "诊断网络已建立，等待 HAOS 请求 IP…", server_ip);
