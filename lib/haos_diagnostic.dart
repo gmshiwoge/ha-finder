@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class DiagnosticAdapter {
@@ -78,6 +79,17 @@ class HaosDiagnosticController extends ChangeNotifier {
       File('${_sessionDirectory.path}${Platform.pathSeparator}state.json');
   File get _stopFile =>
       File('${_sessionDirectory.path}${Platform.pathSeparator}stop.request');
+  File get _logFile =>
+      File('${_sessionDirectory.path}${Platform.pathSeparator}diagnostic.log');
+
+  Future<void> _appendLog(String message) async {
+    await _sessionDirectory.create(recursive: true);
+    await _logFile.writeAsString(
+      '${DateTime.now().toIso8601String()} [APP] $message\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  }
 
   Future<void> loadAdapters() async {
     if (!Platform.isWindows) return;
@@ -150,6 +162,7 @@ ConvertTo-Json -Compress''';
         await _sessionDirectory.delete(recursive: true);
       }
       await _sessionDirectory.create(recursive: true);
+      await _appendLog('开始诊断，网卡=${adapter.name}，ifIndex=${adapter.index}');
       final executableDirectory = File(Platform.resolvedExecutable).parent.path;
       final helper = '$executableDirectory\\haos_diagnostic_helper.exe';
       if (!await File(helper).exists()) {
@@ -159,6 +172,7 @@ ConvertTo-Json -Compress''';
       final escapedHelper = helper.replaceAll("'", "''");
       final escapedState = _stateFile.path.replaceAll("'", "''");
       final escapedStop = _stopFile.path.replaceAll("'", "''");
+      final escapedLog = _logFile.path.replaceAll("'", "''");
       final arguments = <String>[
         '--adapter-index',
         '${adapter.index}',
@@ -166,11 +180,16 @@ ConvertTo-Json -Compress''';
         '"$escapedState"',
         '--stop',
         '"$escapedStop"',
+        '--log',
+        '"$escapedLog"',
         '--parent-pid',
         '$pid',
       ].join(' ');
-      final script =
-          "Start-Process -FilePath '$escapedHelper' -ArgumentList '$arguments' -Verb RunAs";
+      final isAdministrator = await _isRunningAsAdministrator();
+      await _appendLog('主程序管理员权限=$isAdministrator');
+      final script = isAdministrator
+          ? "Start-Process -FilePath '$escapedHelper' -ArgumentList '$arguments'"
+          : "Start-Process -FilePath '$escapedHelper' -ArgumentList '$arguments' -Verb RunAs";
       final result = await Process.run('powershell.exe', [
         '-NoProfile',
         '-NonInteractive',
@@ -178,6 +197,9 @@ ConvertTo-Json -Compress''';
         script,
       ]);
       if (result.exitCode != 0) {
+        await _appendLog(
+          'Helper 启动失败 exitCode=${result.exitCode} stderr=${result.stderr}',
+        );
         throw Exception('管理员授权被取消或 Helper 无法启动。');
       }
       _pollTimer = Timer.periodic(
@@ -187,6 +209,7 @@ ConvertTo-Json -Compress''';
     } on Object catch (caught) {
       running = false;
       error = '$caught';
+      unawaited(_appendLog('启动异常：$caught'));
       snapshot = const DiagnosticSnapshot(stage: 'error', message: '诊断模式启动失败。');
       notifyListeners();
     }
@@ -207,10 +230,31 @@ ConvertTo-Json -Compress''';
         running = false;
         _pollTimer?.cancel();
       }
+      if (snapshot.stage == 'error') error = snapshot.message;
       notifyListeners();
     } on Object {
       // The helper replaces the JSON file atomically; retry on the next tick.
     }
+  }
+
+  Future<bool> _isRunningAsAdministrator() async {
+    const command =
+        r'''$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
+    final result = await Process.run('powershell.exe', const [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      command,
+    ]);
+    return result.exitCode == 0 &&
+        result.stdout.toString().trim().toLowerCase() == 'true';
+  }
+
+  Future<String> readLog() async {
+    if (!await _logFile.exists()) return '尚未生成诊断日志。';
+    return _logFile.readAsString();
   }
 
   void _startHaProbe() {
@@ -411,6 +455,14 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
+                      TextButton(
+                        onPressed: _showLog,
+                        style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xff82949d),
+                        ),
+                        child: const Text('查看诊断日志'),
+                      ),
+                      const Spacer(),
                       if (controller.running)
                         OutlinedButton.icon(
                           onPressed: controller.stop,
@@ -447,6 +499,42 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _showLog() async {
+    final log = await controller.readLog();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('诊断日志'),
+        content: SizedBox(
+          width: 720,
+          height: 420,
+          child: SelectionArea(
+            child: SingleChildScrollView(
+              child: Text(
+                log,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: log));
+              if (context.mounted) Navigator.of(context).pop();
+            },
+            child: const Text('复制日志'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
       ),
     );
   }
@@ -494,7 +582,11 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
           _StatusRow(
             label: '诊断网络',
             value: controller.snapshot.serverIp ?? _stageText(stage),
-            active: stage != 'idle' && stage != 'authorization',
+            active:
+                stage != 'idle' &&
+                stage != 'authorization' &&
+                stage != 'error' &&
+                stage != 'stopped',
           ),
           const Divider(height: 24),
           _StatusRow(

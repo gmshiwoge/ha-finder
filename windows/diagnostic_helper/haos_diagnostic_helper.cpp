@@ -21,7 +21,22 @@ struct Arguments {
   unsigned long parent_pid = 0;
   fs::path state_file;
   fs::path stop_file;
+  fs::path log_file;
 };
+
+void AppendLog(const Arguments& arguments, const std::string& message) {
+  if (arguments.log_file.empty()) return;
+  std::error_code error;
+  fs::create_directories(arguments.log_file.parent_path(), error);
+  SYSTEMTIME time{};
+  GetLocalTime(&time);
+  std::ofstream output(arguments.log_file, std::ios::binary | std::ios::app);
+  output << std::setfill('0') << std::setw(4) << time.wYear << '-'
+         << std::setw(2) << time.wMonth << '-' << std::setw(2) << time.wDay
+         << ' ' << std::setw(2) << time.wHour << ':' << std::setw(2)
+         << time.wMinute << ':' << std::setw(2) << time.wSecond
+         << " [HELPER] " << message << '\n';
+}
 
 struct DhcpRequest {
   uint8_t type = 0;
@@ -80,6 +95,7 @@ bool ParseArguments(int count, wchar_t** values, Arguments* arguments) {
     else if (key == L"--parent-pid") arguments->parent_pid = std::wcstoul(value.c_str(), nullptr, 10);
     else if (key == L"--state") arguments->state_file = value;
     else if (key == L"--stop") arguments->stop_file = value;
+    else if (key == L"--log") arguments->log_file = value;
   }
   return arguments->adapter_index != 0 && !arguments->state_file.empty() &&
          !arguments->stop_file.empty();
@@ -218,16 +234,22 @@ std::string FormatMac(const std::array<uint8_t, 6>& mac) {
 int wmain(int argc, wchar_t** argv) {
   Arguments arguments;
   if (!ParseArguments(argc, argv, &arguments)) return 2;
+  AppendLog(arguments, "Helper started; adapter ifIndex=" +
+                           std::to_string(arguments.adapter_index) +
+                           "; parent pid=" + std::to_string(arguments.parent_pid));
   std::error_code ignored;
   fs::remove(arguments.stop_file, ignored);
 
   const std::string network = ChooseNetwork();
   if (network.empty()) {
+    AppendLog(arguments, "All diagnostic networks overlap existing routes");
     WriteState(arguments, "error", "诊断网段均与现有网络冲突，请断开 VPN 后重试。");
     return 3;
   }
   const std::string server_ip = ReplaceLastOctet(network, 1);
   const std::string lease_ip = ReplaceLastOctet(network, 2);
+  AppendLog(arguments, "Selected network " + network + "/24; server=" +
+                           server_ip + "; lease=" + lease_ip);
   WriteState(arguments, "configuring", "正在配置临时诊断网络…", server_ip);
 
   const std::wstring index = std::to_wstring(arguments.adapter_index);
@@ -243,17 +265,27 @@ int wmain(int argc, wchar_t** argv) {
       firewall_name + L"\"";
 
   if (!RunHidden(add_address)) {
+    AppendLog(arguments, "netsh add address failed");
     WriteState(arguments, "error", "无法为所选网卡添加临时 IP。", server_ip);
     return 4;
   }
+  AppendLog(arguments, "Temporary address added successfully");
   RunHidden(delete_firewall);
-  RunHidden(add_firewall);
+  if (RunHidden(add_firewall)) {
+    AppendLog(arguments, "Windows Firewall UDP 67 rule added");
+  } else {
+    AppendLog(arguments, "WARNING: failed to add Windows Firewall rule");
+  }
+
+  Sleep(1000);
 
   WSADATA winsock{};
   SOCKET socket_handle = INVALID_SOCKET;
   bool winsock_started = WSAStartup(MAKEWORD(2, 2), &winsock) == 0;
   if (winsock_started) socket_handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (socket_handle == INVALID_SOCKET) {
+    AppendLog(arguments, "socket() failed; WSA error=" +
+                             std::to_string(WSAGetLastError()));
     WriteState(arguments, "error", "无法启动 DHCP 网络服务。", server_ip);
     RunHidden(delete_firewall);
     RunHidden(delete_address);
@@ -269,6 +301,8 @@ int wmain(int argc, wchar_t** argv) {
   local.sin_port = htons(67);
   InetPtonA(AF_INET, server_ip.c_str(), &local.sin_addr);
   if (bind(socket_handle, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == SOCKET_ERROR) {
+    AppendLog(arguments, "bind(" + server_ip + ":67) failed; WSA error=" +
+                             std::to_string(WSAGetLastError()));
     WriteState(arguments, "error", "UDP 67 端口被占用，无法启动 DHCP。", server_ip);
     closesocket(socket_handle);
     WSACleanup();
@@ -276,6 +310,7 @@ int wmain(int argc, wchar_t** argv) {
     RunHidden(delete_address);
     return 6;
   }
+  AppendLog(arguments, "DHCP socket listening on " + server_ip + ":67");
 
   HANDLE parent = arguments.parent_pid == 0 ? nullptr :
       OpenProcess(SYNCHRONIZE, FALSE, arguments.parent_pid);
@@ -299,15 +334,27 @@ int wmain(int argc, wchar_t** argv) {
     if (received <= 0 || !ParseDhcp(buffer.data(), received, &request)) continue;
     last_mac = FormatMac(request.mac);
     last_hostname = request.hostname;
+    AppendLog(arguments, "Received DHCP message type=" +
+                             std::to_string(request.type) + "; mac=" + last_mac +
+                             "; hostname=" + last_hostname);
     const uint8_t response_type = request.type == 1 ? 2 : 5;
     const auto response = BuildReply(buffer.data(), received, response_type, server_ip, lease_ip);
     sockaddr_in destination{};
     destination.sin_family = AF_INET;
     destination.sin_port = htons(68);
     destination.sin_addr.s_addr = INADDR_BROADCAST;
-    sendto(socket_handle, reinterpret_cast<const char*>(response.data()),
-           static_cast<int>(response.size()), 0,
-           reinterpret_cast<sockaddr*>(&destination), sizeof(destination));
+    const int sent = sendto(socket_handle,
+                            reinterpret_cast<const char*>(response.data()),
+                            static_cast<int>(response.size()), 0,
+                            reinterpret_cast<sockaddr*>(&destination),
+                            sizeof(destination));
+    if (sent == SOCKET_ERROR) {
+      AppendLog(arguments, "sendto() failed; WSA error=" +
+                               std::to_string(WSAGetLastError()));
+    } else {
+      AppendLog(arguments, response_type == 2 ? "Sent DHCP OFFER"
+                                              : "Sent DHCP ACK");
+    }
     if (response_type == 5) {
       WriteState(arguments, "leased", "已为 HAOS 分配地址，正在检测 8123 服务…",
                  server_ip, lease_ip, last_mac, last_hostname);
@@ -320,7 +367,9 @@ int wmain(int argc, wchar_t** argv) {
   closesocket(socket_handle);
   WSACleanup();
   RunHidden(delete_firewall);
-  RunHidden(delete_address);
+  const bool address_removed = RunHidden(delete_address);
+  AppendLog(arguments, address_removed ? "Temporary address removed; cleanup complete"
+                                       : "WARNING: failed to remove temporary address");
   fs::remove(arguments.stop_file, ignored);
   WriteState(arguments, "stopped", "诊断已停止，临时网络设置已清理。",
              {}, last_mac.empty() ? "" : lease_ip, last_mac, last_hostname);
