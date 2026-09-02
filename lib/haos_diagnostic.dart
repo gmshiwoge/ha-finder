@@ -68,6 +68,7 @@ class HaosDiagnosticController extends ChangeNotifier {
   bool loadingAdapters = false;
   bool running = false;
   bool haReady = false;
+  String? verifiedDeviceIp;
   String? error;
   Timer? _pollTimer;
   Timer? _haProbeTimer;
@@ -82,6 +83,10 @@ class HaosDiagnosticController extends ChangeNotifier {
       File('${_sessionDirectory.path}${Platform.pathSeparator}stop.request');
   File get _logFile =>
       File('${_sessionDirectory.path}${Platform.pathSeparator}diagnostic.log');
+  File get _foundFile =>
+      File('${_sessionDirectory.path}${Platform.pathSeparator}device.found');
+
+  String? get deviceIp => verifiedDeviceIp ?? snapshot.deviceIp;
 
   Future<void> _appendLog(String message) async {
     await _sessionDirectory.create(recursive: true);
@@ -152,6 +157,7 @@ ConvertTo-Json -Compress''';
     if (!Platform.isWindows || adapter == null || running) return;
     error = null;
     haReady = false;
+    verifiedDeviceIp = null;
     running = true;
     snapshot = const DiagnosticSnapshot(
       stage: 'authorization',
@@ -175,6 +181,7 @@ ConvertTo-Json -Compress''';
       final escapedState = _stateFile.path.replaceAll("'", "''");
       final escapedStop = _stopFile.path.replaceAll("'", "''");
       final escapedLog = _logFile.path.replaceAll("'", "''");
+      final escapedFound = _foundFile.path.replaceAll("'", "''");
       final arguments = <String>[
         '--adapter-index',
         '${adapter.index}',
@@ -184,6 +191,8 @@ ConvertTo-Json -Compress''';
         '"$escapedStop"',
         '--log',
         '"$escapedLog"',
+        '--found',
+        '"$escapedFound"',
         '--parent-pid',
         '$pid',
       ].join(' ');
@@ -230,7 +239,11 @@ ConvertTo-Json -Compress''';
       snapshot = DiagnosticSnapshot.fromJson(
         Map<String, dynamic>.from(decoded),
       );
-      if (snapshot.stage == 'leased' && snapshot.deviceIp != null) {
+      if (snapshot.deviceIp != null) verifiedDeviceIp = snapshot.deviceIp;
+      if (snapshot.serverIp != null &&
+          (snapshot.stage == 'configuring' ||
+              snapshot.stage == 'waiting_dhcp' ||
+              snapshot.stage == 'leased')) {
         _startHaProbe();
       }
       if (snapshot.stage == 'stopped' || snapshot.stage == 'error') {
@@ -274,7 +287,7 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
   }
 
   Future<void> _probeHa() async {
-    final address = snapshot.deviceIp;
+    final address = deviceIp ?? _candidateLeaseAddress();
     if (address == null || haReady) return;
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
     try {
@@ -292,7 +305,10 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
           body.toLowerCase().contains(
             'application-name" content="home assistant',
           )) {
+        verifiedDeviceIp = address;
         haReady = true;
+        await _foundFile.writeAsString(address, flush: true);
+        await _appendLog('通过 HTTP 8123 兜底确认 Home Assistant：$address');
         _haProbeTimer?.cancel();
         _haProbeTimer = null;
         notifyListeners();
@@ -304,8 +320,16 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
     }
   }
 
+  String? _candidateLeaseAddress() {
+    final server = snapshot.serverIp;
+    if (server == null) return null;
+    final separator = server.lastIndexOf('.');
+    if (separator < 0) return null;
+    return '${server.substring(0, separator)}.2';
+  }
+
   Future<void> openHa() async {
-    final address = snapshot.deviceIp;
+    final address = deviceIp;
     if (address == null) return;
     await launchUrl(
       Uri.parse('http://$address:8123'),
@@ -605,16 +629,16 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
           _StatusRow(
             label: 'DHCP / HAOS',
             value:
-                controller.snapshot.deviceIp ??
+                controller.deviceIp ??
                 (stage == 'waiting_dhcp' ? '等待设备请求 IP…' : '尚未分配地址'),
-            active: controller.snapshot.deviceIp != null,
+            active: controller.deviceIp != null,
           ),
           const Divider(height: 24),
           _StatusRow(
             label: 'Home Assistant',
             value: controller.haReady
                 ? '8123 服务正常'
-                : controller.snapshot.deviceIp != null
+                : controller.deviceIp != null
                 ? '等待服务启动…'
                 : '等待发现设备',
             active: controller.haReady,

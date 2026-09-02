@@ -23,6 +23,7 @@ struct Arguments {
   fs::path state_file;
   fs::path stop_file;
   fs::path log_file;
+  fs::path found_file;
 };
 
 void AppendLog(const Arguments& arguments, const std::string& message) {
@@ -97,6 +98,7 @@ bool ParseArguments(int count, wchar_t** values, Arguments* arguments) {
     else if (key == L"--state") arguments->state_file = value;
     else if (key == L"--stop") arguments->stop_file = value;
     else if (key == L"--log") arguments->log_file = value;
+    else if (key == L"--found") arguments->found_file = value;
   }
   return arguments->adapter_index != 0 && !arguments->state_file.empty() &&
          !arguments->stop_file.empty();
@@ -442,6 +444,12 @@ int RunHelper(int argc, wchar_t** argv) {
   std::array<uint8_t, 1500> buffer{};
   while (!fs::exists(arguments.stop_file) &&
          (!parent || WaitForSingleObject(parent, 0) == WAIT_TIMEOUT)) {
+    if (!external_dhcp_seen && !arguments.found_file.empty() &&
+        fs::exists(arguments.found_file)) {
+      external_dhcp_seen = true;
+      AppendLog(arguments,
+                "Flutter confirmed HA on port 8123; stopping link-cycle retries");
+    }
     if (!external_dhcp_seen && link_cycle_count < 3 &&
         GetTickCount64() - last_link_cycle >= 30000) {
       AppendLog(arguments,
@@ -515,6 +523,7 @@ int RunHelper(int argc, wchar_t** argv) {
   AppendLog(arguments, address_removed ? "Temporary address removed; cleanup complete"
                                        : "WARNING: failed to remove temporary address");
   fs::remove(arguments.stop_file, ignored);
+  fs::remove(arguments.found_file, ignored);
   WriteState(arguments, "stopped", "诊断已停止，临时网络设置已清理。",
              {}, last_mac.empty() ? "" : lease_ip, last_mac, last_hostname);
   return 0;
