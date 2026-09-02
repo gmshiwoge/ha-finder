@@ -268,7 +268,11 @@ int RunHelper(int argc, wchar_t** argv) {
                            std::to_string(arguments.adapter_index) +
                            "; parent pid=" + std::to_string(arguments.parent_pid));
   std::error_code ignored;
-  fs::remove(arguments.stop_file, ignored);
+  if (fs::exists(arguments.stop_file)) {
+    AppendLog(arguments, "Stop was requested before Helper initialization");
+    WriteState(arguments, "stopped", "诊断已取消，未修改网络设置。");
+    return 0;
+  }
 
   const std::string network = ChooseNetwork();
   if (network.empty()) {

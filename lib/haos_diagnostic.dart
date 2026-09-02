@@ -71,6 +71,7 @@ class HaosDiagnosticController extends ChangeNotifier {
   String? error;
   Timer? _pollTimer;
   Timer? _haProbeTimer;
+  bool _cancelRequested = false;
 
   Directory get _sessionDirectory => Directory(
     '${Directory.systemTemp.path}${Platform.pathSeparator}ha_finder_diagnostic',
@@ -95,6 +96,7 @@ class HaosDiagnosticController extends ChangeNotifier {
     if (!Platform.isWindows) return;
     loadingAdapters = true;
     error = null;
+    _cancelRequested = false;
     notifyListeners();
     try {
       const command = r'''Get-NetAdapter -Physical |
@@ -187,6 +189,7 @@ ConvertTo-Json -Compress''';
       ].join(' ');
       final isAdministrator = await _isRunningAsAdministrator();
       await _appendLog('主程序管理员权限=$isAdministrator');
+      if (_cancelRequested) return;
       final script = isAdministrator
           ? "Start-Process -FilePath '$escapedHelper' -ArgumentList '$arguments'"
           : "Start-Process -FilePath '$escapedHelper' -ArgumentList '$arguments' -Verb RunAs";
@@ -201,6 +204,10 @@ ConvertTo-Json -Compress''';
           'Helper 启动失败 exitCode=${result.exitCode} stderr=${result.stderr}',
         );
         throw Exception('管理员授权被取消或 Helper 无法启动。');
+      }
+      if (_cancelRequested) {
+        await _stopFile.writeAsString('stop', flush: true);
+        return;
       }
       _pollTimer = Timer.periodic(
         const Duration(milliseconds: 600),
@@ -308,6 +315,7 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
 
   Future<void> stop() async {
     if (!running) return;
+    _cancelRequested = true;
     snapshot = DiagnosticSnapshot(
       stage: 'stopping',
       message: '正在停止 DHCP 并恢复网卡设置…',
@@ -318,9 +326,14 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
     );
     notifyListeners();
     await _stopFile.writeAsString('stop');
-    for (var attempt = 0; attempt < 20 && running; attempt++) {
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+    for (var attempt = 0; attempt < 10 && running; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
       await _pollState();
+    }
+    if (running) {
+      running = false;
+      error = '停止请求已发送，后台正在完成网络清理。';
+      notifyListeners();
     }
   }
 
