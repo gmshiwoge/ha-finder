@@ -10,12 +10,14 @@ class HaInstance {
     required this.host,
     required this.port,
     this.scheme = 'http',
+    this.verified = true,
   });
 
   final String name;
   final String host;
   final int port;
   final String scheme;
+  final bool verified;
   String get url => '$scheme://${host.contains(':') ? '[$host]' : host}:$port';
 }
 
@@ -99,7 +101,8 @@ class HomeAssistantDiscovery {
     }
     final subnets = await localSubnets();
     final scanned = await _scanSubnets(subnets.take(3), onProgress: onProgress);
-    return _merge(scanned, discovered);
+    final booting = await _discoverBootingCandidates(subnets.take(3));
+    return _merge([...booting, ...scanned], discovered);
   }
 
   Future<List<HaInstance>> discoverDiagnosticSubnet(String subnet) async {
@@ -231,6 +234,54 @@ class HomeAssistantDiscovery {
       }
     }
     return null;
+  }
+
+  Future<List<HaInstance>> _discoverBootingCandidates(
+    Iterable<String> subnets,
+  ) async {
+    if (!Platform.isWindows && !Platform.isMacOS) return const [];
+    final subnetSet = subnets.toSet();
+    if (subnetSet.isEmpty) return const [];
+    try {
+      final result = Platform.isWindows
+          ? await Process.run('arp.exe', const ['-a'])
+          : await Process.run('/usr/sbin/arp', const ['-a']);
+      if (result.exitCode != 0) return const [];
+      final addresses = RegExp(r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])')
+          .allMatches(result.stdout.toString())
+          .map((match) => match.group(0)!)
+          .where((address) {
+            final separator = address.lastIndexOf('.');
+            return separator > 0 &&
+                subnetSet.contains(address.substring(0, separator));
+          })
+          .toSet();
+      final results = await Future.wait(
+        addresses.map((address) async {
+          try {
+            final reversed = await InternetAddress(
+              address,
+            ).reverse().timeout(const Duration(milliseconds: 800));
+            final hostname = reversed.host.toLowerCase();
+            if (!hostname.contains('homeassistant') &&
+                !hostname.contains('home-assistant')) {
+              return null;
+            }
+            return HaInstance(
+              name: 'Home Assistant 启动中 · ${_withoutDot(reversed.host)}',
+              host: address,
+              port: 8123,
+              verified: false,
+            );
+          } on Object {
+            return null;
+          }
+        }),
+      );
+      return results.whereType<HaInstance>().toList();
+    } on Object {
+      return const [];
+    }
   }
 
   String _withoutDot(String value) =>

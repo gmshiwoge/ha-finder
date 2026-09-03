@@ -301,7 +301,11 @@ class _FinderPageState extends State<FinderPage> {
       );
       final merged = <String, shared.HaInstance>{};
       for (final instance in [...instances, ...existing]) {
-        merged['${instance.host}:${instance.port}'] = instance;
+        final key = '${instance.host}:${instance.port}';
+        final current = merged[key];
+        if (current == null || instance.verified || !current.verified) {
+          merged[key] = instance;
+        }
       }
       if (mounted) {
         setState(() {
@@ -345,6 +349,16 @@ class _FinderPageState extends State<FinderPage> {
   }
 
   Future<void> _open(shared.HaInstance instance) async {
+    if (!instance.verified) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('已发现 HAOS，但 Home Assistant 服务仍在启动，请稍后再次加强搜索。'),
+          ),
+        );
+      }
+      return;
+    }
     final opened = await launchUrl(
       Uri.parse(instance.url),
       mode: LaunchMode.externalApplication,
@@ -605,7 +619,7 @@ class _ServerCard extends StatelessWidget {
     borderRadius: BorderRadius.circular(18),
     clipBehavior: Clip.antiAlias,
     child: InkWell(
-      onTap: onOpen,
+      onTap: instance.verified ? onOpen : null,
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Row(
@@ -633,6 +647,16 @@ class _ServerCard extends StatelessWidget {
                       color: const Color(0xff203943),
                     ),
                   ),
+                  if (!instance.verified) ...[
+                    const SizedBox(height: 4),
+                    const Text(
+                      '网络已上线，等待 8123 服务启动',
+                      style: TextStyle(
+                        color: Color(0xffa36b00),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 4),
                   SelectableText(
                     instance.url,
@@ -652,9 +676,14 @@ class _ServerCard extends StatelessWidget {
             ),
             const SizedBox(width: 4),
             FilledButton.icon(
-              onPressed: onOpen,
-              icon: const Icon(Icons.open_in_new_rounded, size: 18),
-              label: const Text('打开'),
+              onPressed: instance.verified ? onOpen : null,
+              icon: Icon(
+                instance.verified
+                    ? Icons.open_in_new_rounded
+                    : Icons.hourglass_top_rounded,
+                size: 18,
+              ),
+              label: Text(instance.verified ? '打开' : '启动中'),
             ),
           ],
         ),
