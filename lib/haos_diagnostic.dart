@@ -70,6 +70,7 @@ class HaosDiagnosticController extends ChangeNotifier {
   bool loadingAdapters = false;
   bool running = false;
   bool haReady = false;
+  HaInstance? detectedInstance;
   HaInstance? verifiedInstance;
   String? error;
   Timer? _pollTimer;
@@ -90,7 +91,8 @@ class HaosDiagnosticController extends ChangeNotifier {
   File get _foundFile =>
       File('${_sessionDirectory.path}${Platform.pathSeparator}device.found');
 
-  String? get deviceIp => verifiedInstance?.host ?? snapshot.deviceIp;
+  String? get deviceIp =>
+      verifiedInstance?.host ?? detectedInstance?.host ?? snapshot.deviceIp;
 
   Future<void> _appendLog(String message) async {
     await _sessionDirectory.create(recursive: true);
@@ -157,10 +159,9 @@ ConvertTo-Json -Compress''';
 
   Future<void> _loadMacAdapters() async {
     final previousDevice = selectedAdapter?.name;
-    final result = await Process.run(
-      '/usr/sbin/networksetup',
-      const ['-listallhardwareports'],
-    );
+    final result = await Process.run('/usr/sbin/networksetup', const [
+      '-listallhardwareports',
+    ]);
     if (result.exitCode != 0) {
       throw Exception(result.stderr.toString().trim());
     }
@@ -195,7 +196,8 @@ ConvertTo-Json -Compress''';
     final previousMatches = adapters
         .where((adapter) => adapter.name == previousDevice)
         .toList();
-    if (previousMatches.isNotEmpty && _macAdapterScore(previousMatches.first) > 0) {
+    if (previousMatches.isNotEmpty &&
+        _macAdapterScore(previousMatches.first) > 0) {
       selectedAdapter = previousMatches.first;
     } else {
       final connected = [...adapters]
@@ -203,8 +205,8 @@ ConvertTo-Json -Compress''';
           (left, right) =>
               _macAdapterScore(right).compareTo(_macAdapterScore(left)),
         );
-      selectedAdapter = connected.isNotEmpty &&
-              _macAdapterScore(connected.first) > 0
+      selectedAdapter =
+          connected.isNotEmpty && _macAdapterScore(connected.first) > 0
           ? connected.first
           : adapters.length == 1
           ? adapters.first
@@ -217,7 +219,9 @@ ConvertTo-Json -Compress''';
 
   int _macAdapterScore(DiagnosticAdapter adapter) {
     final media = adapter.speed.toLowerCase();
-    if (media.isEmpty || media == 'none' || media.contains('status: inactive')) {
+    if (media.isEmpty ||
+        media == 'none' ||
+        media.contains('status: inactive')) {
       return 0;
     }
     if (media.contains('10000base') || media.contains('10gbase')) return 10000;
@@ -243,6 +247,7 @@ ConvertTo-Json -Compress''';
     }
     error = null;
     haReady = false;
+    detectedInstance = null;
     verifiedInstance = null;
     running = true;
     snapshot = DiagnosticSnapshot(
@@ -430,9 +435,9 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
     _discoveryRunning = true;
     try {
       HaInstance? instance;
-      final leasedAddress = snapshot.deviceIp;
-      if (leasedAddress != null) {
-        instance = await _discovery.probeHost(leasedAddress);
+      final targetAddress = snapshot.deviceIp ?? detectedInstance?.host;
+      if (targetAddress != null) {
+        instance = await _discovery.probeDiagnosticHost(targetAddress);
       }
       final subnet = _diagnosticSubnet();
       if (instance == null && subnet != null) {
@@ -440,12 +445,21 @@ $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)''';
         if (instances.isNotEmpty) instance = instances.first;
       }
       if (instance != null) {
-        verifiedInstance = instance;
-        haReady = true;
-        await _foundFile.writeAsString(instance.host, flush: true);
-        await _appendLog('通过共享发现确认 Home Assistant：${instance.url}');
-        _haProbeTimer?.cancel();
-        _haProbeTimer = null;
+        final previous = detectedInstance;
+        detectedInstance = instance;
+        if (instance.verified) {
+          verifiedInstance = instance;
+          haReady = true;
+          await _foundFile.writeAsString(instance.host, flush: true);
+          await _appendLog('已验证 Home Assistant 8123 服务：${instance.url}');
+          _haProbeTimer?.cancel();
+          _haProbeTimer = null;
+        } else if (previous?.host != instance.host ||
+            previous?.verified == true) {
+          await _appendLog(
+            '已发现 HAOS 网络特征：${instance.name} (${instance.host})，继续等待 8123 服务',
+          );
+        }
         notifyListeners();
       }
     } on Object {
@@ -773,8 +787,10 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
             label: 'Home Assistant',
             value: controller.haReady
                 ? '${controller.verifiedInstance?.port ?? ''} 服务正常'
+                : controller.detectedInstance != null
+                ? 'HAOS 已发现，等待 8123 服务启动…'
                 : controller.deviceIp != null
-                ? '等待服务启动…'
+                ? 'HAOS 已联网，正在检测 8123…'
                 : '等待发现设备',
             active: controller.haReady,
           ),

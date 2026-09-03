@@ -115,7 +115,8 @@ class HomeAssistantDiscovery {
       mdns = const [];
     }
     final scanned = await _scanSubnets([subnet]);
-    return _merge(scanned, mdns);
+    final booting = await _discoverBootingCandidates([subnet]);
+    return _merge([...booting, ...scanned], mdns);
   }
 
   Future<HaInstance?> probeHost(String host) async {
@@ -128,6 +129,39 @@ class HomeAssistantDiscovery {
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<HaInstance?> probeDiagnosticHost(String host) async {
+    final verified = await probeHost(host);
+    if (verified != null) return verified;
+
+    String? hostname;
+    try {
+      final reversed = await InternetAddress(
+        host,
+      ).reverse().timeout(const Duration(milliseconds: 800));
+      if (_isHaosBootHostname(reversed.host)) {
+        hostname = _withoutDot(reversed.host);
+      }
+    } on Object {
+      // Service fingerprinting below also works without reverse DNS.
+    }
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 600)
+      ..findProxy = ((_) => 'DIRECT');
+    try {
+      hostname ??= await _probeBootService(client, host);
+    } finally {
+      client.close(force: true);
+    }
+    if (hostname == null) return null;
+    return HaInstance(
+      name: 'Home Assistant 启动中 · $hostname',
+      host: host,
+      port: 8123,
+      verified: false,
+    );
   }
 
   Future<List<HaInstance>> _scanSubnets(
