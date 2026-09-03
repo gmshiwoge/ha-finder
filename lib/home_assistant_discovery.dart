@@ -287,7 +287,7 @@ class HomeAssistantDiscovery {
   Future<void> _primeNeighborCache(Set<String> subnets) async {
     final targets = <String>[
       for (final subnet in subnets)
-        for (var last = 100; last < 255; last++) '$subnet.$last',
+        for (var last = 2; last < 255; last++) '$subnet.$last',
     ];
     const batchSize = 40;
     for (var start = 0; start < targets.length; start += batchSize) {
@@ -316,12 +316,13 @@ class HomeAssistantDiscovery {
   }
 
   bool _isHaosBootHostname(String hostname) {
-    if (hostname.contains('homeassistant') ||
-        hostname.contains('home-assistant')) {
-      return true;
-    }
-    final tools = RegExp(r'wghatools(\d+)').firstMatch(hostname);
-    return tools != null && (int.tryParse(tools.group(1)!) ?? 0) >= 100;
+    final normalized = hostname.toLowerCase().replaceAll(
+      RegExp(r'[\s._-]+'),
+      '',
+    );
+    return normalized.contains('homeassistant') ||
+        normalized.contains('wghatools') ||
+        normalized.contains('knxos');
   }
 
   String _withoutDot(String value) =>
