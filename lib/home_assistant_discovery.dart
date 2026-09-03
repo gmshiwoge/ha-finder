@@ -243,6 +243,7 @@ class HomeAssistantDiscovery {
     final subnetSet = subnets.toSet();
     if (subnetSet.isEmpty) return const [];
     try {
+      await _primeNeighborCache(subnetSet);
       final result = Platform.isWindows
           ? await Process.run('arp.exe', const ['-a'])
           : await Process.run('/usr/sbin/arp', const ['-a']);
@@ -263,8 +264,7 @@ class HomeAssistantDiscovery {
               address,
             ).reverse().timeout(const Duration(milliseconds: 800));
             final hostname = reversed.host.toLowerCase();
-            if (!hostname.contains('homeassistant') &&
-                !hostname.contains('home-assistant')) {
+            if (!_isHaosBootHostname(hostname)) {
               return null;
             }
             return HaInstance(
@@ -282,6 +282,46 @@ class HomeAssistantDiscovery {
     } on Object {
       return const [];
     }
+  }
+
+  Future<void> _primeNeighborCache(Set<String> subnets) async {
+    final targets = <String>[
+      for (final subnet in subnets)
+        for (var last = 100; last < 255; last++) '$subnet.$last',
+    ];
+    const batchSize = 40;
+    for (var start = 0; start < targets.length; start += batchSize) {
+      final end = (start + batchSize).clamp(0, targets.length);
+      await Future.wait(
+        targets.sublist(start, end).map((address) async {
+          try {
+            if (Platform.isWindows) {
+              await Process.run('ping.exe', ['-n', '1', '-w', '300', address]);
+            } else {
+              await Process.run('/sbin/ping', [
+                '-c',
+                '1',
+                '-W',
+                '500',
+                address,
+              ]);
+            }
+          } on Object {
+            // TCP probing still populates the neighbor table on systems where
+            // launching the platform ping utility is unavailable.
+          }
+        }),
+      );
+    }
+  }
+
+  bool _isHaosBootHostname(String hostname) {
+    if (hostname.contains('homeassistant') ||
+        hostname.contains('home-assistant')) {
+      return true;
+    }
+    final tools = RegExp(r'wghatools(\d+)').firstMatch(hostname);
+    return tools != null && (int.tryParse(tools.group(1)!) ?? 0) >= 100;
   }
 
   String _withoutDot(String value) =>
