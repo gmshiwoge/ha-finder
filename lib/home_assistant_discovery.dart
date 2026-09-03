@@ -136,7 +136,7 @@ class HomeAssistantDiscovery {
   }) async {
     final targets = <String>[
       for (final subnet in subnets)
-        for (var last = 1; last < 255; last++) '$subnet.$last',
+        for (var last = 2; last < 255; last++) '$subnet.$last',
     ];
     final client = HttpClient()
       ..connectionTimeout = const Duration(milliseconds: 450)
@@ -263,7 +263,13 @@ class HomeAssistantDiscovery {
           .map((match) => match.group(0)!)
           .where((address) {
             final separator = address.lastIndexOf('.');
+            final last = separator > 0
+                ? int.tryParse(address.substring(separator + 1))
+                : null;
             return separator > 0 &&
+                last != null &&
+                last >= 2 &&
+                last <= 254 &&
                 subnetSet.contains(address.substring(0, separator));
           })
           .toSet();

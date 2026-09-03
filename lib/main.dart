@@ -260,6 +260,7 @@ class _FinderPageState extends State<FinderPage> {
     setState(() {
       _searching = true;
       _enhanced = false;
+      _instances = const [];
       _progress = null;
       _resultMessage = null;
       _error = null;
@@ -287,40 +288,26 @@ class _FinderPageState extends State<FinderPage> {
     setState(() {
       _searching = true;
       _enhanced = true;
+      _instances = const [];
       _progress = '先进行 mDNS 搜索…';
       _resultMessage = null;
       _error = null;
     });
     try {
-      final existing = _instances;
       final instances = await _discovery.discoverEnhanced(
         onProgress: (checked, total) {
           if (!mounted) return;
           setState(() => _progress = '正在探测局域网：$checked / $total');
         },
       );
-      final merged = <String, shared.HaInstance>{};
-      for (final instance in [...instances, ...existing]) {
-        final key = '${instance.host}:${instance.port}';
-        final current = merged[key];
-        if (current == null || instance.verified || !current.verified) {
-          merged[key] = instance;
-        }
-      }
       if (mounted) {
         setState(() {
-          _instances = merged.values.toList()
-            ..sort(
-              (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
-            );
-          final added = _instances.length - existing.length;
+          _instances = instances;
           _resultSuccess = _instances.isNotEmpty;
           if (_instances.isEmpty) {
             _resultMessage = '加强搜索完成：没有发现 Home Assistant';
-          } else if (added > 0) {
-            _resultMessage = '加强搜索完成：发现 ${_instances.length} 个服务器，新增 $added 个';
           } else {
-            _resultMessage = '加强搜索完成：没有发现新服务器，已保留现有 ${_instances.length} 个';
+            _resultMessage = '加强搜索完成：发现 ${_instances.length} 个服务器';
           }
         });
       }
