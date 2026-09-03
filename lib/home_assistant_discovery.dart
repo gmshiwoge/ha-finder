@@ -121,6 +121,7 @@ class HomeAssistantDiscovery {
   Future<HaInstance?> probeHost(String host) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(milliseconds: 450)
+      ..findProxy = ((_) => 'DIRECT')
       ..badCertificateCallback = (_, _, _) => true;
     try {
       return await _probeHost(client, host);
@@ -139,6 +140,7 @@ class HomeAssistantDiscovery {
     ];
     final client = HttpClient()
       ..connectionTimeout = const Duration(milliseconds: 450)
+      ..findProxy = ((_) => 'DIRECT')
       ..badCertificateCallback = (_, _, _) => true;
     final scanned = <HaInstance>[];
     const batchSize = 40;
@@ -229,6 +231,14 @@ class HomeAssistantDiscovery {
             scheme: target.scheme,
           );
         }
+        if (target.port == 80 && normalized.contains('knxos')) {
+          return HaInstance(
+            name: 'Home Assistant 启动中 · knxos${host.split('.').last}',
+            host: host,
+            port: 8123,
+            verified: false,
+          );
+        }
       } on Object {
         // Unreachable hosts and non-HA services are not matches.
       }
@@ -257,30 +267,53 @@ class HomeAssistantDiscovery {
                 subnetSet.contains(address.substring(0, separator));
           })
           .toSet();
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(milliseconds: 600)
+        ..findProxy = ((_) => 'DIRECT');
       final results = await Future.wait(
         addresses.map((address) async {
+          String? hostname;
           try {
             final reversed = await InternetAddress(
               address,
             ).reverse().timeout(const Duration(milliseconds: 800));
-            final hostname = reversed.host.toLowerCase();
-            if (!_isHaosBootHostname(hostname)) {
-              return null;
+            if (_isHaosBootHostname(reversed.host)) {
+              hostname = _withoutDot(reversed.host);
             }
-            return HaInstance(
-              name: 'Home Assistant 启动中 · ${_withoutDot(reversed.host)}',
-              host: address,
-              port: 8123,
-              verified: false,
-            );
           } on Object {
-            return null;
+            // Fall through to service fingerprinting when reverse DNS fails.
           }
+          hostname ??= await _probeBootService(client, address);
+          if (hostname == null) return null;
+          return HaInstance(
+            name: 'Home Assistant 启动中 · $hostname',
+            host: address,
+            port: 8123,
+            verified: false,
+          );
         }),
       );
+      client.close(force: true);
       return results.whereType<HaInstance>().toList();
     } on Object {
       return const [];
+    }
+  }
+
+  Future<String?> _probeBootService(HttpClient client, String address) async {
+    try {
+      final request = await client
+          .getUrl(Uri.parse('http://$address:7681/'))
+          .timeout(const Duration(milliseconds: 800));
+      request.followRedirects = false;
+      final response = await request.close().timeout(
+        const Duration(milliseconds: 800),
+      );
+      final socket = await response.detachSocket();
+      socket.destroy();
+      return 'wghatools${address.split('.').last}';
+    } on Object {
+      return null;
     }
   }
 
