@@ -277,7 +277,26 @@ class _FinderPageState extends State<FinderPage> {
         });
       }
     } on Object catch (error) {
-      if (mounted) setState(() => _error = '搜索失败：$error');
+      if (Platform.isWindows) {
+        try {
+          final instances = await _discovery.discoverEnhanced();
+          if (mounted) {
+            setState(() {
+              _instances = instances;
+              _resultSuccess = instances.isNotEmpty;
+              _resultMessage = instances.isEmpty
+                  ? 'mDNS 不可用，兼容搜索没有发现 Home Assistant'
+                  : 'mDNS 不可用，兼容搜索发现 ${instances.length} 个服务器';
+            });
+          }
+        } on Object catch (fallbackError) {
+          if (mounted) {
+            setState(() => _error = '搜索失败：$error；兼容搜索失败：$fallbackError');
+          }
+        }
+      } else if (mounted) {
+        setState(() => _error = '搜索失败：$error');
+      }
     } finally {
       if (mounted) setState(() => _searching = false);
     }

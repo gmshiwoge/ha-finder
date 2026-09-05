@@ -42,7 +42,9 @@ class HomeAssistantDiscovery {
           ),
     );
     try {
-      await client.start();
+      await client.start(
+        interfacesFactory: Platform.isWindows ? _windowsMdnsInterfaces : null,
+      );
       final pointers = await client
           .lookup<PtrResourceRecord>(
             ResourceRecordQuery.serverPointer(_serviceType),
@@ -58,6 +60,36 @@ class HomeAssistantDiscovery {
     } finally {
       client.stop();
     }
+  }
+
+  Future<Iterable<NetworkInterface>> _windowsMdnsInterfaces(
+    InternetAddressType type,
+  ) async {
+    final interfaces = await NetworkInterface.list(
+      type: type,
+      includeLoopback: false,
+      includeLinkLocal: false,
+    );
+    const unsupportedNameParts = [
+      'loopback',
+      'vethernet',
+      'virtual',
+      'vmware',
+      'virtualbox',
+      'bluetooth',
+      'tunnel',
+      'vpn',
+      'wsl',
+      'docker',
+    ];
+    return interfaces.where((interface) {
+      final name = interface.name.toLowerCase();
+      if (unsupportedNameParts.any(name.contains)) return false;
+      return interface.addresses.any((address) {
+        final parts = address.address.split('.');
+        return parts.length == 4 && _isPrivate(parts);
+      });
+    });
   }
 
   Future<HaInstance?> _resolve(MDnsClient client, String serviceName) async {
