@@ -23,6 +23,7 @@ struct Arguments {
   std::string interface;
   int parent_pid = 0;
   std::string state, stop, log, found;
+  bool force_100m = false;
 };
 
 std::string ShellQuote(const std::string& value) {
@@ -77,11 +78,39 @@ bool ParseArguments(int argc, char** argv, Arguments* args) {
     else if (key == "--stop") args->stop = value;
     else if (key == "--log") args->log = value;
     else if (key == "--found") args->found = value;
+    else if (key == "--force-100m") args->force_100m = value == "true" || value == "1";
   }
   return !args->interface.empty() && !args->state.empty() && !args->stop.empty();
 }
 
 bool Run(const std::string& command) { return std::system(command.c_str()) == 0; }
+
+std::string Capture(const std::string& command) {
+  std::array<char, 512> buffer{};
+  std::string result;
+  FILE* pipe = popen(command.c_str(), "r");
+  if (!pipe) return result;
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) result += buffer.data();
+  pclose(pipe);
+  return result;
+}
+
+std::string CurrentMediaMode(const std::string& interface) {
+  const std::string output = Capture("/sbin/ifconfig " + ShellQuote(interface));
+  const std::string marker = "media: ";
+  const size_t start = output.find(marker);
+  if (start == std::string::npos) return {};
+  const size_t value_start = start + marker.size();
+  const size_t end = output.find('\n', value_start);
+  const std::string value = output.substr(value_start, end - value_start);
+  if (value.rfind("autoselect", 0) == 0) return "autoselect";
+  const size_t separator = value.find_first_of(" (<");
+  const std::string medium = value.substr(0, separator);
+  if (medium.empty()) return {};
+  return value.find("full-duplex") != std::string::npos
+      ? medium + " mediaopt full-duplex"
+      : medium;
+}
 
 std::string Prefix(const std::string& network) {
   return network.substr(0, network.rfind('.') + 1);
@@ -195,10 +224,33 @@ int main(int argc, char** argv) {
   if (network.empty()) { State(args, "error", "诊断网段均与现有网络冲突，请断开 VPN 后重试。"); return 3; }
   const std::string server_ip = Prefix(network) + "1", lease_ip = Prefix(network) + "2";
   State(args, "configuring", "正在配置临时诊断网络…", server_ip);
+  const std::string original_media = args.force_100m ? CurrentMediaMode(args.interface) : "";
+  bool media_changed = false;
+  const auto restore_media = [&]() {
+    if (!media_changed || original_media.empty()) return;
+    const bool restored = Run("/sbin/ifconfig " + ShellQuote(args.interface) +
+                              " media " + original_media);
+    Log(args, restored ? "Restored original media mode: " + original_media
+                       : "WARNING: failed to restore original media mode: " + original_media);
+    media_changed = false;
+  };
+  if (args.force_100m) {
+    const std::string force = "/sbin/ifconfig " + ShellQuote(args.interface) +
+                              " media 100baseTX mediaopt full-duplex";
+    if (original_media.empty() || !Run(force)) {
+      Log(args, "100 Mbps compatibility mode is unsupported by the selected interface");
+      State(args, "error", "所选网卡不支持强制 100 Mbps 全双工，请关闭兼容模式后重试。",
+            server_ip);
+      return 7;
+    }
+    media_changed = true;
+    Log(args, "Media changed temporarily: original=" + original_media +
+              "; diagnostic=100baseTX full-duplex");
+  }
   const std::string add = "/sbin/ifconfig " + ShellQuote(args.interface) + " alias " + server_ip +
       " netmask 255.255.255.0 broadcast " + Prefix(network) + "255";
   const std::string remove = "/sbin/ifconfig " + ShellQuote(args.interface) + " -alias " + server_ip;
-  if (!Run(add)) { Log(args, "ifconfig alias failed"); State(args, "error", "无法添加临时诊断 IP。", server_ip); return 4; }
+  if (!Run(add)) { Log(args, "ifconfig alias failed"); State(args, "error", "无法添加临时诊断 IP。", server_ip); restore_media(); return 4; }
   Log(args, "Temporary address added; original network configuration unchanged");
 
   const int socket_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -218,7 +270,7 @@ int main(int argc, char** argv) {
   local.sin_addr.s_addr = INADDR_ANY;
   if (socket_fd < 0 || bind(socket_fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) {
     Log(args, "bind failed; errno=" + std::to_string(errno));
-    State(args, "error", "无法监听 DHCP UDP 67 端口。", server_ip); Run(remove); return 5;
+    State(args, "error", "无法监听 DHCP UDP 67 端口。", server_ip); Run(remove); restore_media(); return 5;
   }
   Log(args, "DHCP socket listening on 0.0.0.0:67; server=" + server_ip);
   // Do not administratively cycle a macOS interface here. Some Ethernet and
@@ -269,6 +321,7 @@ int main(int argc, char** argv) {
         last_mac.empty() ? "" : lease_ip, last_mac, last_hostname);
   close(socket_fd); Run(remove);
   Log(args, "Temporary address removed; cleanup complete");
+  restore_media();
   std::remove(args.stop.c_str()); std::remove(args.found.c_str());
   State(args, "stopped", "诊断已停止，临时网络设置已清理。", {},
         last_mac.empty() ? "" : lease_ip, last_mac, last_hostname);

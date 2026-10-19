@@ -69,6 +69,7 @@ class HaosDiagnosticController extends ChangeNotifier {
   );
   bool loadingAdapters = false;
   bool running = false;
+  bool force100Mbps = false;
   bool haReady = false;
   HaInstance? detectedInstance;
   HaInstance? verifiedInstance;
@@ -238,6 +239,12 @@ ConvertTo-Json -Compress''';
     notifyListeners();
   }
 
+  void setForce100Mbps(bool value) {
+    if (running) return;
+    force100Mbps = value;
+    notifyListeners();
+  }
+
   Future<void> start() async {
     final adapter = selectedAdapter;
     if ((!Platform.isWindows && !Platform.isMacOS) ||
@@ -263,7 +270,9 @@ ConvertTo-Json -Compress''';
         await _sessionDirectory.delete(recursive: true);
       }
       await _sessionDirectory.create(recursive: true);
-      await _appendLog('开始诊断，网卡=${adapter.name}，ifIndex=${adapter.index}');
+      await _appendLog(
+        '开始诊断，网卡=${adapter.name}，ifIndex=${adapter.index}，100M兼容模式=$force100Mbps',
+      );
       if (Platform.isMacOS) {
         await _startMacHelper(adapter);
         return;
@@ -292,6 +301,8 @@ ConvertTo-Json -Compress''';
         '"$escapedFound"',
         '--parent-pid',
         '$pid',
+        '--force-100m',
+        force100Mbps ? 'true' : 'false',
       ].join(' ');
       final isAdministrator = await _isRunningAsAdministrator();
       await _appendLog('主程序管理员权限=$isAdministrator');
@@ -355,6 +366,8 @@ ConvertTo-Json -Compress''';
       _shellQuote(_foundFile.path),
       '--parent-pid',
       '$pid',
+      '--force-100m',
+      force100Mbps ? 'true' : 'false',
       '</dev/null >/dev/null 2>&1 &',
     ].join(' ');
     final script =
@@ -628,6 +641,16 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
                   ),
                   const SizedBox(height: 18),
                   _adapterSelector(),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: controller.force100Mbps,
+                    onChanged: controller.running
+                        ? null
+                        : controller.setForce100Mbps,
+                    title: const Text('100 Mbps 兼容模式'),
+                    subtitle: const Text('临时将电脑有线网卡设为 100M 全双工；停止或退出时自动恢复原设置。'),
+                    secondary: const Icon(Icons.speed_rounded),
+                  ),
                   const SizedBox(height: 20),
                   _statusPanel(),
                   if (controller.error != null) ...[

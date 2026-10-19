@@ -24,6 +24,7 @@ struct Arguments {
   fs::path stop_file;
   fs::path log_file;
   fs::path found_file;
+  bool force_100m = false;
 };
 
 void AppendLog(const Arguments& arguments, const std::string& message) {
@@ -102,12 +103,13 @@ bool ParseArguments(int count, wchar_t** values, Arguments* arguments) {
     else if (key == L"--stop") arguments->stop_file = value;
     else if (key == L"--log") arguments->log_file = value;
     else if (key == L"--found") arguments->found_file = value;
+    else if (key == L"--force-100m") arguments->force_100m = value == L"true" || value == L"1";
   }
   return arguments->adapter_index != 0 && !arguments->state_file.empty() &&
          !arguments->stop_file.empty();
 }
 
-bool RunHidden(const std::wstring& command) {
+DWORD RunHiddenExitCode(const std::wstring& command) {
   std::vector<wchar_t> buffer(command.begin(), command.end());
   buffer.push_back(L'\0');
   STARTUPINFOW startup{};
@@ -117,14 +119,18 @@ bool RunHidden(const std::wstring& command) {
   PROCESS_INFORMATION process{};
   if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE,
                       CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-    return false;
+    return static_cast<DWORD>(-1);
   }
-  WaitForSingleObject(process.hProcess, 15000);
-  DWORD exit_code = 1;
-  GetExitCodeProcess(process.hProcess, &exit_code);
+  const DWORD wait_result = WaitForSingleObject(process.hProcess, 15000);
+  DWORD exit_code = static_cast<DWORD>(-1);
+  if (wait_result == WAIT_OBJECT_0) GetExitCodeProcess(process.hProcess, &exit_code);
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
-  return exit_code == 0;
+  return exit_code;
+}
+
+bool RunHidden(const std::wstring& command) {
+  return RunHiddenExitCode(command) == 0;
 }
 
 DWORD AddDiagnosticAddress(unsigned long interface_index,
@@ -173,6 +179,27 @@ bool SetInterfaceEnabled(unsigned long interface_index, bool enabled) {
   row.dwAdminStatus = enabled ? MIB_IF_ADMIN_STATUS_UP
                               : MIB_IF_ADMIN_STATUS_DOWN;
   return SetIfEntry(&row) == NO_ERROR;
+}
+
+int ReadSpeedDuplexValue(unsigned long interface_index) {
+  const std::wstring command =
+      L"powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference='Stop';"
+      L"$a=Get-NetAdapter -InterfaceIndex " + std::to_wstring(interface_index) +
+      L"; $v=(Get-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword '*SpeedDuplex').RegistryValue; "
+      L"$n=[int]([string]$v); if($n -ge 0 -and $n -le 20){exit (100+$n)}else{exit 255}\"";
+  const DWORD exit_code = RunHiddenExitCode(command);
+  return exit_code >= 100 && exit_code <= 120
+      ? static_cast<int>(exit_code - 100)
+      : -1;
+}
+
+bool SetSpeedDuplexValue(unsigned long interface_index, int value) {
+  const std::wstring command =
+      L"powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference='Stop';"
+      L"$a=Get-NetAdapter -InterfaceIndex " + std::to_wstring(interface_index) +
+      L"; Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword '*SpeedDuplex' "
+      L"-RegistryValue " + std::to_wstring(value) + L" -NoRestart -ErrorAction Stop\"";
+  return RunHidden(command);
 }
 
 bool RouteOverlaps(uint32_t network_host_order) {
@@ -335,6 +362,36 @@ int RunHelper(int argc, wchar_t** argv) {
                            server_ip + "; lease=" + lease_ip);
   WriteState(arguments, "configuring", "正在配置临时诊断网络…", server_ip);
 
+  int original_speed_duplex = -1;
+  bool speed_changed = false;
+  const auto restore_speed = [&]() {
+    if (!speed_changed || original_speed_duplex < 0) return;
+    SetInterfaceEnabled(arguments.adapter_index, false);
+    const bool restored = SetSpeedDuplexValue(
+        arguments.adapter_index, original_speed_duplex);
+    SetInterfaceEnabled(arguments.adapter_index, true);
+    AppendLog(arguments, restored
+        ? "Restored original Speed & Duplex registry value=" + std::to_string(original_speed_duplex)
+        : "WARNING: failed to restore original Speed & Duplex value=" + std::to_string(original_speed_duplex));
+    speed_changed = false;
+  };
+  if (arguments.force_100m) {
+    original_speed_duplex = ReadSpeedDuplexValue(arguments.adapter_index);
+    if (original_speed_duplex < 0 ||
+        !SetSpeedDuplexValue(arguments.adapter_index, 4)) {
+      AppendLog(arguments, "100 Mbps compatibility mode is unsupported by the selected adapter driver");
+      WriteState(arguments, "error",
+                 "所选网卡驱动不支持强制 100 Mbps 全双工，请关闭兼容模式后重试。",
+                 server_ip);
+      restore_speed();
+      return 7;
+    }
+    speed_changed = true;
+    AppendLog(arguments, "Speed & Duplex changed temporarily: original=" +
+                             std::to_string(original_speed_duplex) +
+                             "; diagnostic=4 (100 Mbps Full Duplex)");
+  }
+
   const std::wstring firewall_name = L"HA Finder Diagnostic DHCP";
   const std::wstring add_firewall = L"netsh advfirewall firewall add rule name=\"" + firewall_name +
       L"\" dir=in action=allow protocol=UDP localport=67 profile=any";
@@ -349,6 +406,7 @@ int RunHelper(int argc, wchar_t** argv) {
     AppendLog(arguments, "CreateUnicastIpAddressEntry failed; error=" +
                              std::to_string(add_address_result));
     WriteState(arguments, "error", "无法为所选网卡添加临时 IP。", server_ip);
+    restore_speed();
     return 4;
   }
   AppendLog(arguments, address_created
@@ -379,6 +437,7 @@ int RunHelper(int argc, wchar_t** argv) {
     WriteState(arguments, "error", "无法启动 DHCP 网络服务。", server_ip);
     RunHidden(delete_firewall);
     RemoveDiagnosticAddress(arguments.adapter_index, server_ip, address_created);
+    restore_speed();
     if (winsock_started) WSACleanup();
     return 5;
   }
@@ -440,6 +499,7 @@ int RunHelper(int argc, wchar_t** argv) {
     WSACleanup();
     RunHidden(delete_firewall);
     RemoveDiagnosticAddress(arguments.adapter_index, server_ip, address_created);
+    restore_speed();
     return 6;
   }
   AppendLog(arguments, "DHCP socket listening on " + server_ip + ":67");
@@ -581,6 +641,7 @@ int RunHelper(int argc, wchar_t** argv) {
       arguments.adapter_index, server_ip, address_created);
   AppendLog(arguments, address_removed ? "Temporary address removed; cleanup complete"
                                        : "WARNING: failed to remove temporary address");
+  restore_speed();
   fs::remove(arguments.stop_file, ignored);
   fs::remove(arguments.found_file, ignored);
   WriteState(arguments, "stopped", "诊断已停止，临时网络设置已清理。",
