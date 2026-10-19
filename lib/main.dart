@@ -388,28 +388,6 @@ class _FinderPageState extends State<FinderPage> {
     }
   }
 
-  Future<void> _repair(shared.HaInstance instance) async {
-    const command =
-        'nmcli con mod "Supervisor end0" 802-3-ethernet.auto-negotiate yes 802-3-ethernet.speed 100 802-3-ethernet.duplex full && nmcli -g 802-3-ethernet.speed,802-3-ethernet.duplex,802-3-ethernet.auto-negotiate con show "Supervisor end0" && nohup sh -c \'sleep 5; nmcli con up "Supervisor end0"\' >/tmp/net100.log 2>&1 </dev/null &';
-    await Clipboard.setData(const ClipboardData(text: command));
-
-    final repairUrl = Uri(scheme: 'http', host: instance.host, port: 7681);
-    final opened = await launchUrl(
-      repairUrl,
-      mode: LaunchMode.externalApplication,
-    );
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          opened ? '修复命令已复制，请在打开的页面中粘贴并执行。' : '修复命令已复制，但无法打开 $repairUrl',
-        ),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) => Scaffold(
     floatingActionButton: FloatingActionButton.extended(
@@ -495,7 +473,6 @@ class _FinderPageState extends State<FinderPage> {
                 instance: instance,
                 onOpen: () => _open(instance),
                 onCopy: () => _copy(instance),
-                onRepair: () => _repair(instance),
               );
             },
           ),
@@ -637,12 +614,10 @@ class _ServerCard extends StatelessWidget {
     required this.instance,
     required this.onOpen,
     required this.onCopy,
-    required this.onRepair,
   });
   final shared.HaInstance instance;
   final VoidCallback onOpen;
   final VoidCallback onCopy;
-  final VoidCallback onRepair;
 
   @override
   Widget build(BuildContext context) => Material(
@@ -706,12 +681,6 @@ class _ServerCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 4),
-            OutlinedButton.icon(
-              onPressed: onRepair,
-              icon: const Icon(Icons.build_rounded, size: 18),
-              label: const Text('修复'),
-            ),
-            const SizedBox(width: 8),
             FilledButton.icon(
               onPressed: instance.verified ? onOpen : null,
               icon: Icon(

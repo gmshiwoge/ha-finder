@@ -548,6 +548,9 @@ class HaosDiagnosticDialog extends StatefulWidget {
 }
 
 class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
+  static const _networkRepairCommand =
+      'nmcli con mod "Supervisor end0" 802-3-ethernet.auto-negotiate yes 802-3-ethernet.speed 100 802-3-ethernet.duplex full && nmcli -g 802-3-ethernet.speed,802-3-ethernet.duplex,802-3-ethernet.auto-negotiate con show "Supervisor end0" && nohup sh -c \'sleep 5; nmcli con up "Supervisor end0"\' >/tmp/net100.log 2>&1 </dev/null &';
+
   late final HaosDiagnosticController controller;
 
   @override
@@ -564,6 +567,27 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
   Future<void> _close() async {
     if (controller.running) await controller.stop();
     if (mounted) Navigator.of(context).pop();
+  }
+
+  Future<void> _repairDevice() async {
+    final ip = controller.deviceIp;
+    if (ip == null) return;
+
+    await Clipboard.setData(const ClipboardData(text: _networkRepairCommand));
+    final repairUrl = Uri(scheme: 'http', host: ip, port: 7681);
+    final opened = await launchUrl(
+      repairUrl,
+      mode: LaunchMode.externalApplication,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          opened ? '修复命令已复制，请在设备终端页面粘贴并执行。' : '修复命令已复制，但无法打开 $repairUrl',
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   @override
@@ -804,6 +828,13 @@ class _HaosDiagnosticDialogState extends State<HaosDiagnosticDialog> {
                 controller.deviceIp ??
                 (stage == 'waiting_dhcp' ? '等待设备请求 IP…' : '尚未分配地址'),
             active: controller.deviceIp != null,
+            trailing: controller.deviceIp == null
+                ? null
+                : OutlinedButton.icon(
+                    onPressed: _repairDevice,
+                    icon: const Icon(Icons.build_rounded, size: 17),
+                    label: const Text('修复'),
+                  ),
           ),
           const Divider(height: 24),
           _StatusRow(
@@ -870,10 +901,12 @@ class _StatusRow extends StatelessWidget {
     required this.label,
     required this.value,
     required this.active,
+    this.trailing,
   });
   final String label;
   final String value;
   final bool active;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) => Row(
@@ -889,6 +922,7 @@ class _StatusRow extends StatelessWidget {
         child: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
       ),
       Expanded(child: Text(value, textAlign: TextAlign.right)),
+      if (trailing != null) ...[const SizedBox(width: 10), trailing!],
     ],
   );
 }
